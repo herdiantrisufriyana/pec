@@ -1,0 +1,7107 @@
+---
+title: "Hierarchical representation learning of transcriptome and interactome connecting
+  endometrial-decidua-placental origin of preeclampsia subtypes"
+author: "Herdiantri Sufriyana, Emily Chia-Yu Su"
+date: "2023-07-28"
+output: html_document
+---
+
+# Programming environment
+
+```{r Determine settings, include=FALSE}
+seed=2023-07-28
+bioc_version='3.16'
+```
+
+```{r Determine computing requirements, include=FALSE}
+# 1 == file size >=25MB
+# 2 == considerably-long computation
+# 3 == RAM >=8 GB
+# 4 == require GPU
+comp_req=c()#c(1,2,3,4)
+```
+
+```{r Load packages, include=FALSE}
+library(tidyverse)
+library(biomaRt)
+library(Biobase)
+library(oligo)
+rename=dplyr::rename
+expand.grid=base::expand.grid
+slice=dplyr::slice
+summarize=dplyr::summarize
+library(parallelDist)
+library(WGCNA)
+library(limma)
+library(imputeTS)
+library(pbapply)
+library(sva)
+library(ssize)
+library(goseq)
+library(AnnotationDbi)
+select=dplyr::select
+library(GO.db)
+library(igraph)
+library(clixo)
+library(ontologyIndex)
+library(ontologySimilarity)
+library(preprocessCore)
+library(divnn)
+library(Rtsne)
+library(matrixStats)
+rowMedians=Biobase::rowMedians
+```
+
+```{r Set theme, include=FALSE}
+dslabs::ds_theme_set()
+```
+
+```{r Load custom functions, include=FALSE}
+source('R/download_annotation.R')
+source('R/suspected_outliers.R')
+source('R/download_annotation_by_file.R')
+source('R/preprocess_coi.R')
+source('R/create_conv_pcol.R')
+source('R/bind_poi.R')
+source('R/create_who_efw.R')
+source('R/apply_who_efw.R')
+source('R/count_nrow.R')
+source('R/bind_eset.R')
+source('R/bind_comparison.R')
+source('R/take_common_genes.R')
+source('R/compare_pca.R')
+source('R/merge_eset.R')
+source('R/normalize_eset.R')
+source('R/FDR_min_size.R')
+source('R/conduct_dea.R')
+source('R/integrate_dea_to_fData.R')
+source('R/integrate_dea_to_val.R')
+source('R/conduct_oda.R')
+source('R/fisher_eset.R')
+source('R/bulk_fisher_eset.R')
+source('R/vis_bulk_fisher_eset.R')
+source('R/ens_matrix.R')
+source('R/fData_ens.R')
+source('R/exc_go_iea.R')
+source('R/exc_go_igi.R')
+source('R/get_go_annot.R')
+source('R/create_filt_go.R')
+source('R/conduct_go_pea.R')
+source('R/enr_go_ancestors_only.R')
+source('R/subset_by_filt_go.R')
+source('R/bulk_conduct_pea_outcome.R')
+source('R/pea_to_mapping.R')
+source('R/pea_to_hierarchy.R')
+source('R/igraph_dag_tree.R')
+source('R/pear_cor_mat.R')
+source('R/bulk_conduct_cx_outcome.R')
+source('R/cx_to_mapping.R')
+source('R/cx_to_hierarchy.R')
+source('R/get_go_from_obo.R')
+source('R/create_txt_for_alignOntology.R')
+source('R/read_ao_by_rc_results.R')
+source('R/qnorm_val_by_disc_control.R')
+source('R/apply_1bitsgd.R')
+source('R/bar_hut_tsne.R')
+source('R/center_gene_exp.R')
+```
+
+# Load raw data
+
+## Annotation database
+
+```{r Download annotation database, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 1m 20s
+  # Downloaded on 2023-07-28
+  mart=
+    useMart('ensembl')
+  
+  mart %>%
+    saveRDS(file='raw_data/mart.rds')
+  
+  # Downloaded on 2023-07-28
+  ensembl=
+    useDataset('hsapiens_gene_ensembl',mart)
+  
+  ensembl %>%
+    saveRDS(file='raw_data/ensembl.rds')
+}else{
+  mart=
+    readRDS(file='raw_data/mart.rds')
+  
+  ensembl=
+    readRDS(file='raw_data/ensembl.rds')
+}
+```
+
+```{r Identify a platform annotation, eval=FALSE, include=FALSE}
+listAttributes(ensembl)
+```
+
+## GSE75010
+
+```{r GSE75010 - Visit experiment page and create list-folder, include=FALSE}
+# Visit https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE75010
+
+GSE75010=list()
+
+GSE75010$folder='raw_data/GSE75010/'
+
+if(!dir.exists(GSE75010$folder)){
+  GSE75010$folder %>%
+    dir.create(recursive=T)
+}
+```
+
+```{r GSE75010 - Expression set, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 04s
+  # Downloaded on 2023-07-28
+  curl::curl_download(
+    paste0(
+      'https://ftp.ncbi.nlm.nih.gov/geo/series/'
+      ,'GSE75nnn/GSE75010/matrix/GSE75010_series_matrix.txt.gz'
+    )
+    ,paste0(
+      GSE75010$folder
+      ,'GSE75010_series_matrix.txt.gz'
+    )
+  )
+}
+
+GSE75010$eset=
+  GEOquery::getGEO(
+    filename='raw_data/GSE75010/GSE75010_series_matrix.txt.gz'
+    ,destdir='raw_data/GSE75010/'
+    ,GSEMatrix=T
+    ,getGPL=F
+    ,AnnotGPL=F
+    ,parseCharacteristics=F
+  )
+```
+
+```{r GSE75010 - Phenotype data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 32m 45s
+  # Downloaded on 2023-07-28
+  curl::curl_download(
+    paste0(
+      'https://www.ncbi.nlm.nih.gov/geo/download/'
+      ,'?acc=GSE75010&format=file'
+    )
+    ,paste0(
+      GSE75010$folder
+      ,'GSE75010_RAW.tar'
+    )
+  )
+  
+  paste0(
+      GSE75010$folder
+      ,'GSE75010_RAW.tar'
+    ) %>%
+    untar(
+      exdir=
+        paste0(
+          GSE75010$folder
+          ,'raw'
+        )
+    )
+  
+  paste0(
+      GSE75010$folder
+      ,'GSE75010_RAW.tar'
+    ) %>%
+    file.remove()
+}
+
+GSE75010$pData=
+  list.files('raw_data/GSE75010/raw') %>%
+  data.frame() %>%
+  setNames('path') %>%
+  mutate(
+    id=
+      path %>%
+      str_extract_all('GSM[:digit:]+') %>%
+      sapply(\(x)x[[1]])
+  ) %>%
+  right_join(
+    pData(GSE75010$eset) %>%
+      rownames_to_column(var='id')
+    ,by='id'
+  ) %>%
+  column_to_rownames(var='id') %>%
+  .[colnames(GSE75010$eset),]
+```
+
+```{r GSE75010 - Assay data, include=FALSE}
+GSE75010$raw=
+  read.celfiles(
+    paste0('raw_data/GSE75010/raw/',GSE75010$pData$path)
+    ,sampleNames=colnames(GSE75010$eset)
+  )
+
+if(all(c(1,2)%in%comp_req)){ # 06m 10s
+  GSE75010$unnorm=
+    GSE75010$raw %>%
+    rma(background=T,normalize=F)
+  
+  GSE75010$unnorm %>%
+    saveRDS('raw_data/GSE75010/GSE75010_unnorm.rds')
+  
+  GSE75010$norm=
+    GSE75010$raw %>%
+    rma(background=T,normalize=T)
+  
+  GSE75010$norm %>%
+    saveRDS('raw_data/GSE75010/GSE75010_norm.rds')
+}else{
+  GSE75010$unnorm=
+    readRDS('raw_data/GSE75010/GSE75010_unnorm.rds')
+  
+  GSE75010$norm=
+    readRDS('raw_data/GSE75010/GSE75010_norm.rds')
+}
+```
+
+```{r GSE75010 - Feature data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 02m 14s
+  # Downloaded on 2023-07-28
+  GSE75010$fData=
+    download_annotation(
+      platform='affy_hugene_1_0_st_v1'
+      ,mart=ensembl
+    ) %>%
+    .[intersect(rownames(GSE75010$norm),rownames(.)),]
+  
+  GSE75010$fData %>%
+    saveRDS('raw_data/GSE75010/GSE75010_fData.rds')
+}else{
+  GSE75010$fData=
+    readRDS('raw_data/GSE75010/GSE75010_fData.rds')
+}
+```
+
+```{r GSE75010 - Sample outliers by RLE (SOR), include=FALSE}
+GSE75010$RLE_data=
+  suspected_outliers(GSE75010$unnorm)
+```
+
+```{r GSE75010 - Plot SOR, eval=FALSE, fig.height=9, fig.width=9, include=FALSE}
+GSE75010$RLE_data %>%
+  ggplot(aes(x=sample_id,y=RLE,fill=suspect_outlier)) +
+  geom_boxplot(outlier.shape=NA) +
+  theme_minimal() +
+  theme(axis.text.x=element_blank())
+```
+
+```{r GSE75010 - Sample outliers by HClust (SOH), include=FALSE}
+GSE75010$sample_hclust=
+  parallelDist(
+    t(exprs(GSE75010$unnorm))
+    ,method='manhattan'
+  ) %>%
+  hclust(method='complete')
+```
+
+```{r GSE75010 - Sample outliers (SO), include=FALSE}
+GSE75010$outliers=
+  cutree(GSE75010$sample_hclust,k=3) %>%
+  .[. %in% 2:3] %>%
+  names() %>%
+  intersect(
+    GSE75010$RLE_data %>%
+      filter(suspect_outlier=='yes') %>%
+      .$sample_id %>%
+      .[!duplicated(.)]
+  )
+
+GSE75010$sample_hclust$labels=
+  ifelse(
+    GSE75010$sample_hclust$labels %in% GSE75010$outliers
+    ,GSE75010$sample_hclust$labels
+    ,''
+  )
+```
+
+```{r GSE75010 - Plot SO, eval=FALSE, fig.height=9, fig.width=9, include=FALSE}
+plot(GSE75010$sample_hclust,cex=0.6)
+rect.hclust(GSE75010$sample_hclust,k=3,border=2:4)
+```
+
+```{r GSE75010 - Low-expressed probes (LEP), include=FALSE}
+GSE75010$low_exp_probes=
+  rownames(GSE75010$norm) %>%
+  .[rowMedians(exprs(GSE75010$norm))
+    <=quantile(
+      rowMedians(exprs(GSE75010$norm))
+      ,GSE75010$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ]
+```
+
+```{r GSE75010 - LEP, eval=FALSE, fig.height=3.5, fig.width=3.5, include=FALSE}
+GSE75010$norm %>%
+  exprs() %>%
+  rowMedians() %>%
+  hist(100)
+
+abline(
+  v=quantile(
+      rowMedians(exprs(GSE75010$norm))
+      ,GSE75010$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ,col=2
+  ,lwd=3
+)
+```
+
+```{r GSE75010 - New expression set without LEP and SO, include=FALSE}
+GSE75010$filt_eset=
+  ExpressionSet(
+    assayData=
+      GSE75010$unnorm[rownames(GSE75010$fData),rownames(GSE75010$pData)] %>%
+      exprs()
+    ,phenoData=
+      AnnotatedDataFrame(GSE75010$pData)
+    ,featureData=
+      AnnotatedDataFrame(GSE75010$fData)
+    ,protocolData=
+      protocolData(GSE75010$eset)
+    ,experimentData=
+      experimentData(GSE75010$eset)
+    ,annotation=
+      annotation(GSE75010$eset)
+  ) %>%
+  .[!(rownames(.) %in% GSE75010$low_exp_probes)
+    ,!(colnames(.) %in% GSE75010$outliers)
+  ]
+```
+
+```{r GSE75010 - Summarize to HGNC symbol, include=FALSE}
+GSE75010$sum_to_hgnc=
+  collapseRows(
+    datET=
+      exprs(GSE75010$filt_eset)
+    ,rowID=
+      rownames(GSE75010$filt_eset)
+    ,rowGroup=
+      fData(GSE75010$filt_eset)['hgnc_symbol'] %>%
+      as.list() %>%
+      unlist()
+  )
+```
+
+```{r GSE75010 - HGNC expression set, include=FALSE}
+GSE75010$hgnc_eset=
+  ExpressionSet(
+    assayData=
+      GSE75010$sum_to_hgnc$datETcollapsed
+    ,phenoData=
+      AnnotatedDataFrame(pData(GSE75010$filt_eset))
+    ,featureData=
+      GSE75010$sum_to_hgnc$group2row %>%
+      as.data.frame() %>%
+      setNames(c('hgnc_symbol','probe_id')) %>%
+      left_join(
+        GSE75010$fData %>%
+          rownames_to_column(var='probe_id')
+        ,by=c('hgnc_symbol','probe_id')
+      ) %>%
+      column_to_rownames(var='hgnc_symbol') %>% 
+      AnnotatedDataFrame()
+    ,protocolData=
+      protocolData(GSE75010$filt_eset)
+    ,experimentData=
+      experimentData(GSE75010$filt_eset)
+    ,annotation=
+      annotation(GSE75010$filt_eset)
+  )
+```
+
+## GSE98224
+
+```{r GSE98224 - Visit experiment page and create list-folder, include=FALSE}
+# Visit https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE98224
+
+GSE98224=list()
+
+GSE98224$folder='raw_data/GSE98224/'
+
+if(!dir.exists(GSE98224$folder)){
+  GSE98224$folder %>%
+    dir.create(recursive=T)
+}
+```
+
+```{r GSE98224 - Expression set, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 01s
+  # Downloaded on 2023-07-28
+  curl::curl_download(
+    paste0(
+      'https://ftp.ncbi.nlm.nih.gov/geo/series/'
+      ,'GSE98nnn/GSE98224/matrix/GSE98224-GPL6244_series_matrix.txt.gz'
+    )
+    ,paste0(
+      GSE98224$folder
+      ,'GSE98224-GPL6244_series_matrix.txt.gz'
+    )
+  )
+}
+
+GSE98224$eset=
+  GEOquery::getGEO(
+    filename='raw_data/GSE98224/GSE98224-GPL6244_series_matrix.txt.gz'
+    ,destdir='raw_data/GSE98224/'
+    ,GSEMatrix=T
+    ,getGPL=F
+    ,AnnotGPL=F
+    ,parseCharacteristics=F
+  )
+```
+
+```{r GSE98224 - Phenotype data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 20m 12s
+  # Downloaded on 2023-07-28
+  curl::curl_download(
+    paste0(
+      'https://www.ncbi.nlm.nih.gov/geo/download/'
+      ,'?acc=GSE98224&format=file'
+    )
+    ,paste0(
+      GSE98224$folder
+      ,'GSE98224_RAW.tar'
+    )
+  )
+  
+  paste0(
+      GSE98224$folder
+      ,'GSE98224_RAW.tar'
+    ) %>%
+    untar(
+      exdir=
+        paste0(
+          GSE98224$folder
+          ,'raw'
+        )
+    )
+  
+  paste0(
+      GSE98224$folder
+      ,'GSE98224_RAW.tar'
+    ) %>%
+    file.remove()
+  
+  list.files('raw_data/GSE98224/raw',full.names=T) %>%
+    .[!str_detect(.,'\\.CEL\\.gz')] %>%
+    sapply(file.remove)
+}
+
+GSE98224$pData=
+  list.files('raw_data/GSE98224/raw') %>%
+  data.frame() %>%
+  setNames('path') %>%
+  mutate(
+    id=
+      path %>%
+      str_extract_all('GSM[:digit:]+') %>%
+      sapply(\(x)x[[1]])
+  ) %>%
+  right_join(
+    pData(GSE98224$eset) %>%
+      rownames_to_column(var='id')
+    ,by='id'
+  ) %>%
+  column_to_rownames(var='id') %>%
+  .[colnames(GSE98224$eset),]
+```
+
+```{r GSE98224 - Assay data, include=FALSE}
+GSE98224$raw=
+  read.celfiles(
+    paste0('raw_data/GSE98224/raw/',GSE98224$pData$path)
+    ,sampleNames=colnames(GSE98224$eset)
+  )
+
+if(all(c(1,2)%in%comp_req)){ # 03m 08s
+  GSE98224$unnorm=
+    GSE98224$raw %>%
+    rma(background=T,normalize=F)
+  
+  GSE98224$unnorm %>%
+    saveRDS('raw_data/GSE98224/GSE98224_unnorm.rds')
+  
+  GSE98224$norm=
+    GSE98224$raw %>%
+    rma(background=T,normalize=T)
+  
+  GSE98224$norm %>%
+    saveRDS('raw_data/GSE98224/GSE98224_norm.rds')
+}else{
+  GSE98224$unnorm=
+    readRDS('raw_data/GSE98224/GSE98224_unnorm.rds')
+  
+  GSE98224$norm=
+    readRDS('raw_data/GSE98224/GSE98224_norm.rds')
+}
+```
+
+```{r GSE98224 - Feature data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 04s
+  # Downloaded on 2023-07-28
+  GSE98224$fData=
+    download_annotation(
+      platform='affy_hugene_1_0_st_v1'
+      ,mart=ensembl
+    ) %>%
+    .[intersect(rownames(GSE98224$norm),rownames(.)),]
+  
+  GSE98224$fData %>%
+    saveRDS('raw_data/GSE98224/GSE98224_fData.rds')
+}else{
+  GSE98224$fData=
+    readRDS('raw_data/GSE98224/GSE98224_fData.rds')
+}
+```
+
+```{r GSE98224 - Sample outliers by RLE (SOR), include=FALSE}
+GSE98224$RLE_data=
+  suspected_outliers(GSE98224$unnorm)
+```
+
+```{r GSE98224 - Plot SOR, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+GSE98224$RLE_data %>%
+  ggplot(aes(x=sample_id,y=RLE,fill=suspect_outlier)) +
+  geom_boxplot(outlier.shape=NA) +
+  theme_minimal() +
+  theme(axis.text.x=element_blank())
+```
+
+```{r GSE98224 - Sample outliers by HClust (SOH), include=FALSE}
+GSE98224$sample_hclust=
+  parallelDist(
+    t(exprs(GSE98224$unnorm))
+    ,method='manhattan'
+  ) %>%
+  hclust(method='complete')
+```
+
+```{r GSE98224 - Sample outliers (SO), include=FALSE}
+GSE98224$outliers=
+  cutree(GSE98224$sample_hclust,k=3) %>%
+  .[. %in% 2:3] %>%
+  names() %>%
+  intersect(
+    GSE98224$RLE_data %>%
+      filter(suspect_outlier=='yes') %>%
+      .$sample_id %>%
+      .[!duplicated(.)]
+  )
+
+GSE98224$sample_hclust$labels=
+  ifelse(
+    GSE98224$sample_hclust$labels %in% GSE98224$outliers
+    ,GSE98224$sample_hclust$labels
+    ,''
+  )
+```
+
+```{r GSE98224 - Plot SO, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+plot(GSE98224$sample_hclust,cex=0.6)
+rect.hclust(GSE98224$sample_hclust,k=3,border=2:4)
+```
+
+```{r GSE98224 - Low-expressed probes (LEP), include=FALSE}
+GSE98224$low_exp_probes=
+  rownames(GSE98224$norm) %>%
+  .[rowMedians(exprs(GSE98224$norm))
+    <=quantile(
+      rowMedians(exprs(GSE98224$norm))
+      ,GSE98224$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ]
+```
+
+```{r GSE98224 - LEP, eval=FALSE, fig.height=3.5, fig.width=3.5, include=FALSE}
+GSE98224$norm %>%
+  exprs() %>%
+  rowMedians() %>%
+  hist(100)
+
+abline(
+  v=quantile(
+      rowMedians(exprs(GSE98224$norm))
+      ,GSE98224$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ,col=2
+  ,lwd=3
+)
+```
+
+```{r GSE98224 - New expression set without LEP and SO, include=FALSE}
+GSE98224$filt_eset=
+  ExpressionSet(
+    assayData=
+      GSE98224$unnorm[rownames(GSE98224$fData),rownames(GSE98224$pData)] %>%
+      exprs()
+    ,phenoData=
+      AnnotatedDataFrame(GSE98224$pData)
+    ,featureData=
+      AnnotatedDataFrame(GSE98224$fData)
+    ,protocolData=
+      protocolData(GSE98224$eset)
+    ,experimentData=
+      experimentData(GSE98224$eset)
+    ,annotation=
+      annotation(GSE98224$eset)
+  ) %>%
+  .[!(rownames(.) %in% GSE98224$low_exp_probes)
+    ,!(colnames(.) %in% GSE98224$outliers)
+  ]
+```
+
+```{r GSE98224 - Summarize to HGNC symbol, include=FALSE}
+GSE98224$sum_to_hgnc=
+  collapseRows(
+    datET=
+      exprs(GSE98224$filt_eset)
+    ,rowID=
+      rownames(GSE98224$filt_eset)
+    ,rowGroup=
+      fData(GSE98224$filt_eset)['hgnc_symbol'] %>%
+      as.list() %>%
+      unlist()
+  )
+```
+
+```{r GSE98224 - HGNC expression set, include=FALSE}
+GSE98224$hgnc_eset=
+  ExpressionSet(
+    assayData=
+      GSE98224$sum_to_hgnc$datETcollapsed
+    ,phenoData=
+      AnnotatedDataFrame(pData(GSE98224$filt_eset))
+    ,featureData=
+      GSE98224$sum_to_hgnc$group2row %>%
+      as.data.frame() %>%
+      setNames(c('hgnc_symbol','probe_id')) %>%
+      left_join(
+        GSE98224$fData %>%
+          rownames_to_column(var='probe_id')
+        ,by=c('hgnc_symbol','probe_id')
+      ) %>%
+      column_to_rownames(var='hgnc_symbol') %>% 
+      AnnotatedDataFrame()
+    ,protocolData=
+      protocolData(GSE98224$filt_eset)
+    ,experimentData=
+      experimentData(GSE98224$filt_eset)
+    ,annotation=
+      annotation(GSE98224$filt_eset)
+  )
+```
+
+## GSE100415
+
+```{r GSE100415 - Visit experiment page and create list-folder, include=FALSE}
+# Visit https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE100415
+
+GSE100415=list()
+
+GSE100415$folder='raw_data/GSE100415/'
+
+if(!dir.exists(GSE100415$folder)){
+  GSE100415$folder %>%
+    dir.create(recursive=T)
+}
+```
+
+```{r GSE100415 - Expression set, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 02s
+  # Downloaded on 2023-07-28
+  curl::curl_download(
+    paste0(
+      'https://ftp.ncbi.nlm.nih.gov/geo/series/'
+      ,'GSE100nnn/GSE100415/matrix/GSE100415_series_matrix.txt.gz'
+    )
+    ,paste0(
+      GSE100415$folder
+      ,'GSE100415_series_matrix.txt.gz'
+    )
+  )
+}
+
+GSE100415$eset=
+  GEOquery::getGEO(
+    filename='raw_data/GSE100415/GSE100415_series_matrix.txt.gz'
+    ,destdir='raw_data/GSE100415/'
+    ,GSEMatrix=T
+    ,getGPL=F
+    ,AnnotGPL=F
+    ,parseCharacteristics=F
+  )
+```
+
+```{r GSE100415 - Phenotype data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 08m 47s
+  # Downloaded on 2023-07-28
+  curl::curl_download(
+    paste0(
+      'https://www.ncbi.nlm.nih.gov/geo/download/'
+      ,'?acc=GSE100415&format=file'
+    )
+    ,paste0(
+      GSE100415$folder
+      ,'GSE100415_RAW.tar'
+    )
+  )
+  
+  paste0(
+      GSE100415$folder
+      ,'GSE100415_RAW.tar'
+    ) %>%
+    untar(
+      exdir=
+        paste0(
+          GSE100415$folder
+          ,'raw'
+        )
+    )
+  
+  paste0(
+      GSE100415$folder
+      ,'GSE100415_RAW.tar'
+    ) %>%
+    file.remove()
+}
+
+GSE100415$pData=
+  list.files('raw_data/GSE100415/raw') %>%
+  data.frame() %>%
+  setNames('path') %>%
+  mutate(
+    id=
+      path %>%
+      str_extract_all('GSM[:digit:]+') %>%
+      sapply(\(x)x[[1]])
+  ) %>%
+  right_join(
+    pData(GSE100415$eset) %>%
+      rownames_to_column(var='id')
+    ,by='id'
+  ) %>%
+  column_to_rownames(var='id') %>%
+  .[colnames(GSE100415$eset),]
+```
+
+```{r GSE100415 - Assay data, include=FALSE}
+GSE100415$raw=
+  read.celfiles(
+    paste0('raw_data/GSE100415/raw/',GSE100415$pData$path)
+    ,sampleNames=colnames(GSE100415$eset)
+  )
+
+if(all(c(1,2)%in%comp_req)){ # 02m 18s
+  GSE100415$unnorm=
+    GSE100415$raw %>%
+    rma(background=T,normalize=F)
+  
+  GSE100415$unnorm %>%
+    saveRDS('raw_data/GSE100415/GSE100415_unnorm.rds')
+  
+  GSE100415$norm=
+    GSE100415$raw %>%
+    rma(background=T,normalize=T)
+  
+  GSE100415$norm %>%
+    saveRDS('raw_data/GSE100415/GSE100415_norm.rds')
+}else{
+  GSE100415$unnorm=
+    readRDS('raw_data/GSE100415/GSE100415_unnorm.rds')
+  
+  GSE100415$norm=
+    readRDS('raw_data/GSE100415/GSE100415_norm.rds')
+}
+```
+
+```{r GSE100415 - Feature data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 06s
+  # Downloaded on 2023-07-28
+  GSE100415$fData=
+    download_annotation(
+      platform='affy_hugene_1_0_st_v1'
+      ,mart=ensembl
+    ) %>%
+    .[intersect(rownames(GSE100415$norm),rownames(.)),]
+  
+  GSE100415$fData %>%
+    saveRDS('raw_data/GSE100415/GSE100415_fData.rds')
+}else{
+  GSE100415$fData=
+    readRDS('raw_data/GSE100415/GSE100415_fData.rds')
+}
+```
+
+```{r GSE100415 - Sample outliers by RLE (SOR), include=FALSE}
+GSE100415$RLE_data=
+  suspected_outliers(GSE100415$unnorm)
+```
+
+```{r GSE100415 - Plot SOR, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+GSE100415$RLE_data %>%
+  ggplot(aes(x=sample_id,y=RLE,fill=suspect_outlier)) +
+  geom_boxplot(outlier.shape=NA) +
+  theme_minimal() +
+  theme(axis.text.x=element_blank())
+```
+
+```{r GSE100415 - Sample outliers by HClust (SOH), include=FALSE}
+GSE100415$sample_hclust=
+  parallelDist(
+    t(exprs(GSE100415$unnorm))
+    ,method='manhattan'
+  ) %>%
+  hclust(method='complete')
+```
+
+```{r GSE100415 - Sample outliers (SO), include=FALSE}
+GSE100415$outliers=
+  cutree(GSE100415$sample_hclust,k=3) %>%
+  .[. %in% 2:3] %>%
+  names() %>%
+  intersect(
+    GSE100415$RLE_data %>%
+      filter(suspect_outlier=='yes') %>%
+      .$sample_id %>%
+      .[!duplicated(.)]
+  )
+
+GSE100415$sample_hclust$labels=
+  ifelse(
+    GSE100415$sample_hclust$labels %in% GSE100415$outliers
+    ,GSE100415$sample_hclust$labels
+    ,''
+  )
+```
+
+```{r GSE100415 - Plot SO, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+plot(GSE100415$sample_hclust,cex=0.6)
+rect.hclust(GSE100415$sample_hclust,k=3,border=2:4)
+```
+
+```{r GSE100415 - Low-expressed probes (LEP), include=FALSE}
+GSE100415$low_exp_probes=
+  rownames(GSE100415$norm) %>%
+  .[rowMedians(exprs(GSE100415$norm))
+    <=quantile(
+      rowMedians(exprs(GSE100415$norm))
+      ,GSE100415$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ]
+```
+
+```{r GSE100415 - LEP, eval=FALSE, fig.height=3.5, fig.width=3.5, include=FALSE}
+GSE100415$norm %>%
+  exprs() %>%
+  rowMedians() %>%
+  hist(100)
+
+abline(
+  v=quantile(
+      rowMedians(exprs(GSE100415$norm))
+      ,GSE100415$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ,col=2
+  ,lwd=3
+)
+```
+
+```{r GSE100415 - New expression set without LEP and SO, include=FALSE}
+GSE100415$filt_eset=
+  ExpressionSet(
+    assayData=
+      GSE100415$unnorm[rownames(GSE100415$fData),rownames(GSE100415$pData)] %>%
+      exprs()
+    ,phenoData=
+      AnnotatedDataFrame(GSE100415$pData)
+    ,featureData=
+      AnnotatedDataFrame(GSE100415$fData)
+    ,protocolData=
+      protocolData(GSE100415$eset)
+    ,experimentData=
+      experimentData(GSE100415$eset)
+    ,annotation=
+      annotation(GSE100415$eset)
+  ) %>%
+  .[!(rownames(.) %in% GSE100415$low_exp_probes)
+    ,!(colnames(.) %in% GSE100415$outliers)
+  ]
+```
+
+```{r GSE100415 - Summarize to HGNC symbol, include=FALSE}
+GSE100415$sum_to_hgnc=
+  collapseRows(
+    datET=
+      exprs(GSE100415$filt_eset)
+    ,rowID=
+      rownames(GSE100415$filt_eset)
+    ,rowGroup=
+      fData(GSE100415$filt_eset)['hgnc_symbol'] %>%
+      as.list() %>%
+      unlist()
+  )
+```
+
+```{r GSE100415 - HGNC expression set, include=FALSE}
+GSE100415$hgnc_eset=
+  ExpressionSet(
+    assayData=
+      GSE100415$sum_to_hgnc$datETcollapsed
+    ,phenoData=
+      AnnotatedDataFrame(pData(GSE100415$filt_eset))
+    ,featureData=
+      GSE100415$sum_to_hgnc$group2row %>%
+      as.data.frame() %>%
+      setNames(c('hgnc_symbol','probe_id')) %>%
+      left_join(
+        GSE100415$fData %>%
+          rownames_to_column(var='probe_id')
+        ,by=c('hgnc_symbol','probe_id')
+      ) %>%
+      column_to_rownames(var='hgnc_symbol') %>% 
+      AnnotatedDataFrame()
+    ,protocolData=
+      protocolData(GSE100415$filt_eset)
+    ,experimentData=
+      experimentData(GSE100415$filt_eset)
+    ,annotation=
+      annotation(GSE100415$filt_eset)
+  )
+```
+
+## GSE4888
+
+```{r GSE4888 - Visit experiment page and create list-folder, include=FALSE}
+# Visit https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE4888
+
+GSE4888=list()
+
+GSE4888$folder='raw_data/GSE4888/'
+
+if(!dir.exists(GSE4888$folder)){
+  GSE4888$folder %>%
+    dir.create(recursive=T)
+}
+```
+
+```{r GSE4888 - Expression set, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 01s
+  # Downloaded on 2023-07-28
+  curl::curl_download(
+    paste0(
+      'https://ftp.ncbi.nlm.nih.gov/geo/series/'
+      ,'GSE4nnn/GSE4888/matrix/GSE4888_series_matrix.txt.gz'
+    )
+    ,paste0(
+      GSE4888$folder
+      ,'GSE4888_series_matrix.txt.gz'
+    )
+  )
+}
+
+GSE4888$eset=
+  GEOquery::getGEO(
+    filename='raw_data/GSE4888/GSE4888_series_matrix.txt.gz'
+    ,destdir='raw_data/GSE4888/'
+    ,GSEMatrix=T
+    ,getGPL=F
+    ,AnnotGPL=F
+    ,parseCharacteristics=F
+  )
+```
+
+```{r GSE4888 - Phenotype data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 12m 15s
+  # Downloaded on 2023-07-28
+  curl::curl_download(
+    paste0(
+      'https://www.ncbi.nlm.nih.gov/geo/download/'
+      ,'?acc=GSE4888&format=file'
+    )
+    ,paste0(
+      GSE4888$folder
+      ,'GSE4888_RAW.tar'
+    )
+  )
+  
+  paste0(
+      GSE4888$folder
+      ,'GSE4888_RAW.tar'
+    ) %>%
+    untar(
+      exdir=
+        paste0(
+          GSE4888$folder
+          ,'raw'
+        )
+    )
+  
+  paste0(
+      GSE4888$folder
+      ,'GSE4888_RAW.tar'
+    ) %>%
+    file.remove()
+}
+
+GSE4888$pData=
+  list.files('raw_data/GSE4888/raw') %>%
+  data.frame() %>%
+  setNames('path') %>%
+  mutate(
+    id=
+      path %>%
+      str_extract_all('GSM[:digit:]+') %>%
+      sapply(\(x)x[[1]])
+  ) %>%
+  right_join(
+    pData(GSE4888$eset) %>%
+      rownames_to_column(var='id')
+    ,by='id'
+  ) %>%
+  column_to_rownames(var='id') %>%
+  .[colnames(GSE4888$eset),]
+```
+
+```{r GSE4888 - Assay data, include=FALSE}
+GSE4888$raw=
+  read.celfiles(
+    paste0('raw_data/GSE4888/raw/',GSE4888$pData$path)
+    ,sampleNames=colnames(GSE4888$eset)
+  )
+
+if(all(c(1,2)%in%comp_req)){ # 02m 18s
+  GSE4888$unnorm=
+    GSE4888$raw %>%
+    rma(background=T,normalize=F)
+  
+  GSE4888$unnorm %>%
+    saveRDS('raw_data/GSE4888/GSE4888_unnorm.rds')
+  
+  GSE4888$norm=
+    GSE4888$raw %>%
+    rma(background=T,normalize=T)
+  
+  GSE4888$norm %>%
+    saveRDS('raw_data/GSE4888/GSE4888_norm.rds')
+}else{
+  GSE4888$unnorm=
+    readRDS('raw_data/GSE4888/GSE4888_unnorm.rds')
+  
+  GSE4888$norm=
+    readRDS('raw_data/GSE4888/GSE4888_norm.rds')
+}
+```
+
+```{r GSE4888 - Feature data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 03m 16s
+  # Downloaded on 2023-07-28
+  GSE4888$fData=
+    download_annotation(
+      platform='affy_hg_u133_plus_2'
+      ,mart=ensembl
+    ) %>%
+    .[intersect(rownames(GSE4888$norm),rownames(.)),]
+  
+  GSE4888$fData %>%
+    saveRDS('raw_data/GSE4888/GSE4888_fData.rds')
+}else{
+  GSE4888$fData=
+    readRDS('raw_data/GSE4888/GSE4888_fData.rds')
+}
+```
+
+```{r GSE4888 - Sample outliers by RLE (SOR), include=FALSE}
+GSE4888$RLE_data=
+  suspected_outliers(GSE4888$unnorm)
+```
+
+```{r GSE4888 - Plot SOR, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+GSE4888$RLE_data %>%
+  ggplot(aes(x=sample_id,y=RLE,fill=suspect_outlier)) +
+  geom_boxplot(outlier.shape=NA) +
+  theme_minimal() +
+  theme(axis.text.x=element_blank())
+```
+
+```{r GSE4888 - Sample outliers by HClust (SOH), include=FALSE}
+GSE4888$sample_hclust=
+  parallelDist(
+    t(exprs(GSE4888$unnorm))
+    ,method='manhattan'
+  ) %>%
+  hclust(method='complete')
+```
+
+```{r GSE4888 - Sample outliers (SO), include=FALSE}
+GSE4888$outliers=
+  cutree(GSE4888$sample_hclust,k=3) %>%
+  .[. %in% 2:3] %>%
+  names() %>%
+  intersect(
+    GSE4888$RLE_data %>%
+      filter(suspect_outlier=='yes') %>%
+      .$sample_id %>%
+      .[!duplicated(.)]
+  )
+
+GSE4888$sample_hclust$labels=
+  ifelse(
+    GSE4888$sample_hclust$labels %in% GSE4888$outliers
+    ,GSE4888$sample_hclust$labels
+    ,''
+  )
+```
+
+```{r GSE4888 - Plot SO, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+plot(GSE4888$sample_hclust,cex=0.6)
+rect.hclust(GSE4888$sample_hclust,k=3,border=2:4)
+```
+
+```{r GSE4888 - Low-expressed probes (LEP), include=FALSE}
+GSE4888$low_exp_probes=
+  rownames(GSE4888$norm) %>%
+  .[rowMedians(exprs(GSE4888$norm))
+    <=quantile(
+      rowMedians(exprs(GSE4888$norm))
+      ,GSE4888$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ]
+```
+
+```{r GSE4888 - LEP, eval=FALSE, fig.height=3.5, fig.width=3.5, include=FALSE}
+GSE4888$norm %>%
+  exprs() %>%
+  rowMedians() %>%
+  hist(100)
+
+abline(
+  v=quantile(
+      rowMedians(exprs(GSE4888$norm))
+      ,GSE4888$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ,col=2
+  ,lwd=3
+)
+```
+
+```{r GSE4888 - New expression set without LEP and SO, include=FALSE}
+GSE4888$filt_eset=
+  ExpressionSet(
+    assayData=
+      GSE4888$unnorm[rownames(GSE4888$fData),rownames(GSE4888$pData)] %>%
+      exprs()
+    ,phenoData=
+      AnnotatedDataFrame(GSE4888$pData)
+    ,featureData=
+      AnnotatedDataFrame(GSE4888$fData)
+    ,protocolData=
+      protocolData(GSE4888$eset)
+    ,experimentData=
+      experimentData(GSE4888$eset)
+    ,annotation=
+      annotation(GSE4888$eset)
+  ) %>%
+  .[!(rownames(.) %in% GSE4888$low_exp_probes)
+    ,!(colnames(.) %in% GSE4888$outliers)
+  ]
+```
+
+```{r GSE4888 - Summarize to HGNC symbol, include=FALSE}
+GSE4888$sum_to_hgnc=
+  collapseRows(
+    datET=
+      exprs(GSE4888$filt_eset)
+    ,rowID=
+      rownames(GSE4888$filt_eset)
+    ,rowGroup=
+      fData(GSE4888$filt_eset)['hgnc_symbol'] %>%
+      as.list() %>%
+      unlist()
+  )
+```
+
+```{r GSE4888 - HGNC expression set, include=FALSE}
+GSE4888$hgnc_eset=
+  ExpressionSet(
+    assayData=
+      GSE4888$sum_to_hgnc$datETcollapsed
+    ,phenoData=
+      AnnotatedDataFrame(pData(GSE4888$filt_eset))
+    ,featureData=
+      GSE4888$sum_to_hgnc$group2row %>%
+      as.data.frame() %>%
+      setNames(c('hgnc_symbol','probe_id')) %>%
+      left_join(
+        GSE4888$fData %>%
+          rownames_to_column(var='probe_id')
+        ,by=c('hgnc_symbol','probe_id')
+      ) %>%
+      column_to_rownames(var='hgnc_symbol') %>% 
+      AnnotatedDataFrame()
+    ,protocolData=
+      protocolData(GSE4888$filt_eset)
+    ,experimentData=
+      experimentData(GSE4888$filt_eset)
+    ,annotation=
+      annotation(GSE4888$filt_eset)
+  )
+```
+
+## GSE6364
+
+```{r GSE6364 - Visit experiment page and create list-folder, include=FALSE}
+# Visit https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE6364
+
+GSE6364=list()
+
+GSE6364$folder='raw_data/GSE6364/'
+
+if(!dir.exists(GSE6364$folder)){
+  GSE6364$folder %>%
+    dir.create(recursive=T)
+}
+```
+
+```{r GSE6364 - Expression set, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 07s
+  # Downloaded on 2023-07-28
+  curl::curl_download(
+    paste0(
+      'https://ftp.ncbi.nlm.nih.gov/geo/series/'
+      ,'GSE6nnn/GSE6364/matrix/GSE6364_series_matrix.txt.gz'
+    )
+    ,paste0(
+      GSE6364$folder
+      ,'GSE6364_series_matrix.txt.gz'
+    )
+  )
+}
+
+GSE6364$eset=
+  GEOquery::getGEO(
+    filename='raw_data/GSE6364/GSE6364_series_matrix.txt.gz'
+    ,destdir='raw_data/GSE6364/'
+    ,GSEMatrix=T
+    ,getGPL=F
+    ,AnnotGPL=F
+    ,parseCharacteristics=F
+  )
+```
+
+```{r GSE6364 - Phenotype data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 12m 15s
+  # Downloaded on 2023-07-28
+  curl::curl_download(
+    paste0(
+      'https://www.ncbi.nlm.nih.gov/geo/download/'
+      ,'?acc=GSE6364&format=file'
+    )
+    ,paste0(
+      GSE6364$folder
+      ,'GSE6364_RAW.tar'
+    )
+  )
+  
+  paste0(
+      GSE6364$folder
+      ,'GSE6364_RAW.tar'
+    ) %>%
+    untar(
+      exdir=
+        paste0(
+          GSE6364$folder
+          ,'raw'
+        )
+    )
+  
+  paste0(
+      GSE6364$folder
+      ,'GSE6364_RAW.tar'
+    ) %>%
+    file.remove()
+}
+
+GSE6364$pData=
+  list.files('raw_data/GSE6364/raw') %>%
+  data.frame() %>%
+  setNames('path') %>%
+  mutate(
+    id=
+      path %>%
+      str_extract_all('GSM[:digit:]+') %>%
+      sapply(\(x)x[[1]])
+  ) %>%
+  right_join(
+    pData(GSE6364$eset) %>%
+      rownames_to_column(var='id')
+    ,by='id'
+  ) %>%
+  column_to_rownames(var='id') %>%
+  .[colnames(GSE6364$eset),]
+```
+
+```{r GSE6364 - Assay data, include=FALSE}
+GSE6364$raw=
+  read.celfiles(
+    paste0('raw_data/GSE6364/raw/',GSE6364$pData$path)
+    ,sampleNames=colnames(GSE6364$eset)
+  )
+
+if(all(c(1,2)%in%comp_req)){ # 02m 18s
+  GSE6364$unnorm=
+    GSE6364$raw %>%
+    rma(background=T,normalize=F)
+  
+  GSE6364$unnorm %>%
+    saveRDS('raw_data/GSE6364/GSE6364_unnorm.rds')
+  
+  GSE6364$norm=
+    GSE6364$raw %>%
+    rma(background=T,normalize=T)
+  
+  GSE6364$norm %>%
+    saveRDS('raw_data/GSE6364/GSE6364_norm.rds')
+}else{
+  GSE6364$unnorm=
+    readRDS('raw_data/GSE6364/GSE6364_unnorm.rds')
+  
+  GSE6364$norm=
+    readRDS('raw_data/GSE6364/GSE6364_norm.rds')
+}
+```
+
+```{r GSE6364 - Feature data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 03m 16s
+  # Downloaded on 2023-07-28
+  GSE6364$fData=
+    download_annotation(
+      platform='affy_hg_u133_plus_2'
+      ,mart=ensembl
+    ) %>%
+    .[intersect(rownames(GSE6364$norm),rownames(.)),]
+  
+  GSE6364$fData %>%
+    saveRDS('raw_data/GSE6364/GSE6364_fData.rds')
+}else{
+  GSE6364$fData=
+    readRDS('raw_data/GSE6364/GSE6364_fData.rds')
+}
+```
+
+```{r GSE6364 - Sample outliers by RLE (SOR), include=FALSE}
+GSE6364$RLE_data=
+  suspected_outliers(GSE6364$unnorm)
+```
+
+```{r GSE6364 - Plot SOR, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+GSE6364$RLE_data %>%
+  ggplot(aes(x=sample_id,y=RLE,fill=suspect_outlier)) +
+  geom_boxplot(outlier.shape=NA) +
+  theme_minimal() +
+  theme(axis.text.x=element_blank())
+```
+
+```{r GSE6364 - Sample outliers by HClust (SOH), include=FALSE}
+GSE6364$sample_hclust=
+  parallelDist(
+    t(exprs(GSE6364$unnorm))
+    ,method='manhattan'
+  ) %>%
+  hclust(method='complete')
+```
+
+```{r GSE6364 - Sample outliers (SO), include=FALSE}
+GSE6364$outliers=
+  cutree(GSE6364$sample_hclust,k=3) %>%
+  .[. %in% 2:3] %>%
+  names() %>%
+  intersect(
+    GSE6364$RLE_data %>%
+      filter(suspect_outlier=='yes') %>%
+      .$sample_id %>%
+      .[!duplicated(.)]
+  )
+
+GSE6364$sample_hclust$labels=
+  ifelse(
+    GSE6364$sample_hclust$labels %in% GSE6364$outliers
+    ,GSE6364$sample_hclust$labels
+    ,''
+  )
+```
+
+```{r GSE6364 - Plot SO, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+plot(GSE6364$sample_hclust,cex=0.6)
+rect.hclust(GSE6364$sample_hclust,k=3,border=2:4)
+```
+
+```{r GSE6364 - Low-expressed probes (LEP), include=FALSE}
+GSE6364$low_exp_probes=
+  rownames(GSE6364$norm) %>%
+  .[rowMedians(exprs(GSE6364$norm))
+    <=quantile(
+      rowMedians(exprs(GSE6364$norm))
+      ,GSE6364$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ]
+```
+
+```{r GSE6364 - LEP, eval=FALSE, fig.height=3.5, fig.width=3.5, include=FALSE}
+GSE6364$norm %>%
+  exprs() %>%
+  rowMedians() %>%
+  hist(100)
+
+abline(
+  v=quantile(
+      rowMedians(exprs(GSE6364$norm))
+      ,GSE6364$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ,col=2
+  ,lwd=3
+)
+```
+
+```{r GSE6364 - New expression set without LEP and SO, include=FALSE}
+GSE6364$filt_eset=
+  ExpressionSet(
+    assayData=
+      GSE6364$unnorm[rownames(GSE6364$fData),rownames(GSE6364$pData)] %>%
+      exprs()
+    ,phenoData=
+      AnnotatedDataFrame(GSE6364$pData)
+    ,featureData=
+      AnnotatedDataFrame(GSE6364$fData)
+    ,protocolData=
+      protocolData(GSE6364$eset)
+    ,experimentData=
+      experimentData(GSE6364$eset)
+    ,annotation=
+      annotation(GSE6364$eset)
+  ) %>%
+  .[!(rownames(.) %in% GSE6364$low_exp_probes)
+    ,!(colnames(.) %in% GSE6364$outliers)
+  ]
+```
+
+```{r GSE6364 - Summarize to HGNC symbol, include=FALSE}
+GSE6364$sum_to_hgnc=
+  collapseRows(
+    datET=
+      exprs(GSE6364$filt_eset)
+    ,rowID=
+      rownames(GSE6364$filt_eset)
+    ,rowGroup=
+      fData(GSE6364$filt_eset)['hgnc_symbol'] %>%
+      as.list() %>%
+      unlist()
+  )
+```
+
+```{r GSE6364 - HGNC expression set, include=FALSE}
+GSE6364$hgnc_eset=
+  ExpressionSet(
+    assayData=
+      GSE6364$sum_to_hgnc$datETcollapsed
+    ,phenoData=
+      AnnotatedDataFrame(pData(GSE6364$filt_eset))
+    ,featureData=
+      GSE6364$sum_to_hgnc$group2row %>%
+      as.data.frame() %>%
+      setNames(c('hgnc_symbol','probe_id')) %>%
+      left_join(
+        GSE6364$fData %>%
+          rownames_to_column(var='probe_id')
+        ,by=c('hgnc_symbol','probe_id')
+      ) %>%
+      column_to_rownames(var='hgnc_symbol') %>% 
+      AnnotatedDataFrame()
+    ,protocolData=
+      protocolData(GSE6364$filt_eset)
+    ,experimentData=
+      experimentData(GSE6364$filt_eset)
+    ,annotation=
+      annotation(GSE6364$filt_eset)
+  )
+```
+
+## EMTAB680
+
+```{r EMTAB680 - Visit experiment page and create list-folder, include=FALSE}
+# Visit https://www.ebi.ac.uk/arrayexpress/experiments/E-MTAB-680/
+
+EMTAB680=list()
+
+EMTAB680$folder='raw_data/EMTAB680/'
+
+if(!dir.exists(EMTAB680$folder)){
+  EMTAB680$folder %>%
+    dir.create(recursive=T)
+}
+```
+
+```{r EMTAB680 - Expression set, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 07s
+  # Downloaded on 2023-07-28
+  ArrayExpress::ArrayExpress('E-MTAB-680',path='raw_data/EMTAB680/',save=T) %>%
+    saveRDS('raw_data/EMTAB680/EMTAB680_eset.rds')
+}else{
+  
+}
+
+EMTAB680$eset=
+  readRDS('raw_data/EMTAB680/EMTAB680_eset.rds')
+```
+
+```{r EMTAB680 - Phenotype data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 12m 15s
+  # Downloaded on 2023-07-28
+  paste0(
+      EMTAB680$folder
+      ,'E-MTAB-680.raw.1.zip'
+    ) %>%
+    unzip(
+      exdir=
+        paste0(
+          EMTAB680$folder
+          ,'raw'
+        )
+    )
+  
+  paste0(
+      EMTAB680$folder
+      ,'E-MTAB-680.raw.1.zip'
+    ) %>%
+    file.remove()
+}
+
+EMTAB680$pData=
+  list.files('raw_data/EMTAB680/raw') %>%
+  data.frame() %>%
+  setNames('path') %>%
+  mutate(
+    id=
+      path
+    # %>%
+    #   str_extract_all('GSM[:digit:]+') %>%
+    #   sapply(\(x)x[[1]])
+  ) %>%
+  right_join(
+    pData(EMTAB680$eset) %>%
+      rownames_to_column(var='id')
+    ,by='id'
+  ) %>%
+  column_to_rownames(var='id') %>%
+  .[colnames(EMTAB680$eset),]
+```
+
+```{r EMTAB680 - Assay data, include=FALSE}
+EMTAB680$raw=
+  read.celfiles(
+    paste0('raw_data/EMTAB680/raw/',EMTAB680$pData$path)
+    ,sampleNames=colnames(EMTAB680$eset)
+  )
+
+if(all(c(1,2)%in%comp_req)){ # 02m 07s
+  EMTAB680$unnorm=
+    EMTAB680$raw %>%
+    rma(background=T,normalize=F)
+  
+  EMTAB680$unnorm %>%
+    saveRDS('raw_data/EMTAB680/EMTAB680_unnorm.rds')
+  
+  EMTAB680$norm=
+    EMTAB680$raw %>%
+    rma(background=T,normalize=T)
+  
+  EMTAB680$norm %>%
+    saveRDS('raw_data/EMTAB680/EMTAB680_norm.rds')
+}else{
+  EMTAB680$unnorm=
+    readRDS('raw_data/EMTAB680/EMTAB680_unnorm.rds')
+  
+  EMTAB680$norm=
+    readRDS('raw_data/EMTAB680/EMTAB680_norm.rds')
+}
+```
+
+```{r EMTAB680 - Feature data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 00s
+  # Downloaded on 2023-07-28
+  EMTAB680$fData=
+    download_annotation(
+      platform='affy_hg_u133_plus_2'
+      ,mart=ensembl
+    ) %>%
+    .[intersect(rownames(EMTAB680$norm),rownames(.)),]
+  
+  EMTAB680$fData %>%
+    saveRDS('raw_data/EMTAB680/EMTAB680_fData.rds')
+}else{
+  EMTAB680$fData=
+    readRDS('raw_data/EMTAB680/EMTAB680_fData.rds')
+}
+```
+
+```{r EMTAB680 - Sample outliers by RLE (SOR), include=FALSE}
+EMTAB680$RLE_data=
+  suspected_outliers(EMTAB680$unnorm)
+```
+
+```{r EMTAB680 - Plot SOR, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+EMTAB680$RLE_data %>%
+  ggplot(aes(x=sample_id,y=RLE,fill=suspect_outlier)) +
+  geom_boxplot(outlier.shape=NA) +
+  theme_minimal() +
+  theme(axis.text.x=element_blank())
+```
+
+```{r EMTAB680 - Sample outliers by HClust (SOH), include=FALSE}
+EMTAB680$sample_hclust=
+  parallelDist(
+    t(exprs(EMTAB680$unnorm))
+    ,method='manhattan'
+  ) %>%
+  hclust(method='complete')
+```
+
+```{r EMTAB680 - Sample outliers (SO), include=FALSE}
+EMTAB680$outliers=
+  cutree(EMTAB680$sample_hclust,k=2) %>%
+  .[. %in% 1] %>%
+  names() %>%
+  intersect(
+    EMTAB680$RLE_data %>%
+      filter(suspect_outlier=='yes') %>%
+      .$sample_id %>%
+      .[!duplicated(.)]
+  )
+
+EMTAB680$sample_hclust$labels=
+  ifelse(
+    EMTAB680$sample_hclust$labels %in% EMTAB680$outliers
+    ,EMTAB680$sample_hclust$labels
+    ,''
+  )
+```
+
+```{r EMTAB680 - Plot SO, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+plot(EMTAB680$sample_hclust,cex=0.6)
+rect.hclust(EMTAB680$sample_hclust,k=2,border=2:3)
+```
+
+```{r EMTAB680 - Low-expressed probes (LEP), include=FALSE}
+EMTAB680$low_exp_probes=
+  rownames(EMTAB680$norm) %>%
+  .[rowMedians(exprs(EMTAB680$norm))
+    <=quantile(
+      rowMedians(exprs(EMTAB680$norm))
+      ,EMTAB680$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ]
+```
+
+```{r EMTAB680 - LEP, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+EMTAB680$norm %>%
+  exprs() %>%
+  rowMedians() %>%
+  hist(100)
+
+abline(
+  v=quantile(
+      rowMedians(exprs(EMTAB680$norm))
+      ,EMTAB680$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ,col=2
+  ,lwd=3
+)
+```
+
+```{r EMTAB680 - New expression set without LEP and SO, include=FALSE}
+EMTAB680$filt_eset=
+  ExpressionSet(
+    assayData=
+      EMTAB680$unnorm[rownames(EMTAB680$fData),rownames(EMTAB680$pData)] %>%
+      exprs()
+    ,phenoData=
+      AnnotatedDataFrame(EMTAB680$pData)
+    ,featureData=
+      AnnotatedDataFrame(EMTAB680$fData)
+    ,protocolData=
+      protocolData(EMTAB680$eset)
+    ,experimentData=
+      experimentData(EMTAB680$eset)
+    ,annotation=
+      annotation(EMTAB680$eset)
+  ) %>%
+  .[!(rownames(.) %in% EMTAB680$low_exp_probes)
+    ,!(colnames(.) %in% EMTAB680$outliers)
+  ]
+```
+
+```{r EMTAB680 - Summarize to HGNC symbol, include=FALSE}
+EMTAB680$sum_to_hgnc=
+  collapseRows(
+    datET=
+      exprs(EMTAB680$filt_eset)
+    ,rowID=
+      rownames(EMTAB680$filt_eset)
+    ,rowGroup=
+      fData(EMTAB680$filt_eset)['hgnc_symbol'] %>%
+      as.list() %>%
+      unlist()
+  )
+```
+
+```{r EMTAB680 - HGNC expression set, include=FALSE}
+EMTAB680$hgnc_eset=
+  ExpressionSet(
+    assayData=
+      EMTAB680$sum_to_hgnc$datETcollapsed
+    ,phenoData=
+      AnnotatedDataFrame(pData(EMTAB680$filt_eset))
+    ,featureData=
+      EMTAB680$sum_to_hgnc$group2row %>%
+      as.data.frame() %>%
+      setNames(c('hgnc_symbol','probe_id')) %>%
+      left_join(
+        EMTAB680$fData %>%
+          rownames_to_column(var='probe_id')
+        ,by=c('hgnc_symbol','probe_id')
+      ) %>%
+      column_to_rownames(var='hgnc_symbol') %>% 
+      AnnotatedDataFrame()
+    ,protocolData=
+      protocolData(EMTAB680$filt_eset)
+    ,experimentData=
+      experimentData(EMTAB680$filt_eset)
+    ,annotation=
+      annotation(EMTAB680$filt_eset)
+  )
+```
+
+## GSE12767
+
+```{r GSE12767 - Visit experiment page and create list-folder, include=FALSE}
+# Visit https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE12767
+
+GSE12767=list()
+
+GSE12767$folder='raw_data/GSE12767/'
+
+if(!dir.exists(GSE12767$folder)){
+  GSE12767$folder %>%
+    dir.create(recursive=T)
+}
+```
+
+```{r GSE12767 - Expression set, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 01s
+  # Downloaded on 2023-07-28
+  curl::curl_download(
+    paste0(
+      'https://ftp.ncbi.nlm.nih.gov/geo/series/'
+      ,'GSE12nnn/GSE12767/matrix/GSE12767_series_matrix.txt.gz'
+    )
+    ,paste0(
+      GSE12767$folder
+      ,'GSE12767_series_matrix.txt.gz'
+    )
+  )
+}
+
+GSE12767$eset=
+  GEOquery::getGEO(
+    filename='raw_data/GSE12767/GSE12767_series_matrix.txt.gz'
+    ,destdir='raw_data/GSE12767/'
+    ,GSEMatrix=T
+    ,getGPL=F
+    ,AnnotGPL=F
+    ,parseCharacteristics=F
+  )
+```
+
+```{r GSE12767 - Phenotype data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 12m 15s
+  # Downloaded on 2023-07-28
+  curl::curl_download(
+    paste0(
+      'https://www.ncbi.nlm.nih.gov/geo/download/'
+      ,'?acc=GSE12767&format=file'
+    )
+    ,paste0(
+      GSE12767$folder
+      ,'GSE12767_RAW.tar'
+    )
+  )
+  
+  paste0(
+      GSE12767$folder
+      ,'GSE12767_RAW.tar'
+    ) %>%
+    untar(
+      exdir=
+        paste0(
+          GSE12767$folder
+          ,'raw'
+        )
+    )
+  
+  paste0(
+      GSE12767$folder
+      ,'GSE12767_RAW.tar'
+    ) %>%
+    file.remove()
+}
+
+GSE12767$pData=
+  list.files('raw_data/GSE12767/raw') %>%
+  data.frame() %>%
+  setNames('path') %>%
+  mutate(
+    id=
+      path %>%
+      str_extract_all('GSM[:digit:]+') %>%
+      sapply(\(x)x[[1]])
+  ) %>%
+  right_join(
+    pData(GSE12767$eset) %>%
+      rownames_to_column(var='id')
+    ,by='id'
+  ) %>%
+  column_to_rownames(var='id') %>%
+  .[colnames(GSE12767$eset),]
+```
+
+```{r GSE12767 - Assay data, include=FALSE}
+GSE12767$raw=
+  read.celfiles(
+    paste0('raw_data/GSE12767/raw/',GSE12767$pData$path)
+    ,sampleNames=colnames(GSE12767$eset)
+  )
+
+if(all(c(1,2)%in%comp_req)){ # 01m 27s
+  GSE12767$unnorm=
+    GSE12767$raw %>%
+    rma(background=T,normalize=F)
+  
+  GSE12767$unnorm %>%
+    saveRDS('raw_data/GSE12767/GSE12767_unnorm.rds')
+  
+  GSE12767$norm=
+    GSE12767$raw %>%
+    rma(background=T,normalize=T)
+  
+  GSE12767$norm %>%
+    saveRDS('raw_data/GSE12767/GSE12767_norm.rds')
+}else{
+  GSE12767$unnorm=
+    readRDS('raw_data/GSE12767/GSE12767_unnorm.rds')
+  
+  GSE12767$norm=
+    readRDS('raw_data/GSE12767/GSE12767_norm.rds')
+}
+```
+
+```{r GSE12767 - Feature data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 11s
+  # Downloaded on 2023-07-28
+  GSE12767$fData=
+    download_annotation(
+      platform='affy_hg_u133_plus_2'
+      ,mart=ensembl
+    ) %>%
+    .[intersect(rownames(GSE12767$norm),rownames(.)),]
+  
+  GSE12767$fData %>%
+    saveRDS('raw_data/GSE12767/GSE12767_fData.rds')
+}else{
+  GSE12767$fData=
+    readRDS('raw_data/GSE12767/GSE12767_fData.rds')
+}
+```
+
+```{r GSE12767 - Sample outliers by RLE (SOR), include=FALSE}
+GSE12767$RLE_data=
+  suspected_outliers(GSE12767$unnorm)
+```
+
+```{r GSE12767 - Plot SOR, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+GSE12767$RLE_data %>%
+  ggplot(aes(x=sample_id,y=RLE,fill=suspect_outlier)) +
+  geom_boxplot(outlier.shape=NA) +
+  theme_minimal() +
+  theme(axis.text.x=element_blank())
+```
+
+```{r GSE12767 - Sample outliers by HClust (SOH), include=FALSE}
+GSE12767$sample_hclust=
+  parallelDist(
+    t(exprs(GSE12767$unnorm))
+    ,method='manhattan'
+  ) %>%
+  hclust(method='complete')
+```
+
+```{r GSE12767 - Sample outliers (SO), include=FALSE}
+GSE12767$outliers=
+  cutree(GSE12767$sample_hclust,k=4) %>%
+  .[. %in% 3:4] %>%
+  names() %>%
+  intersect(
+    GSE12767$RLE_data %>%
+      filter(suspect_outlier=='yes') %>%
+      .$sample_id %>%
+      .[!duplicated(.)]
+  )
+
+GSE12767$sample_hclust$labels=
+  ifelse(
+    GSE12767$sample_hclust$labels %in% GSE12767$outliers
+    ,GSE12767$sample_hclust$labels
+    ,''
+  )
+```
+
+```{r GSE12767 - Plot SO, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+plot(GSE12767$sample_hclust,cex=0.6)
+rect.hclust(GSE12767$sample_hclust,k=4,border=2:5)
+```
+
+```{r GSE12767 - Low-expressed probes (LEP), include=FALSE}
+GSE12767$low_exp_probes=
+  rownames(GSE12767$norm) %>%
+  .[rowMedians(exprs(GSE12767$norm))
+    <=quantile(
+      rowMedians(exprs(GSE12767$norm))
+      ,GSE12767$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ]
+```
+
+```{r GSE12767 - LEP, eval=FALSE, fig.height=3.5, fig.width=3.5, include=FALSE}
+GSE12767$norm %>%
+  exprs() %>%
+  rowMedians() %>%
+  hist(100)
+
+abline(
+  v=quantile(
+      rowMedians(exprs(GSE12767$norm))
+      ,GSE12767$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ,col=2
+  ,lwd=3
+)
+```
+
+```{r GSE12767 - New expression set without LEP and SO, include=FALSE}
+GSE12767$filt_eset=
+  ExpressionSet(
+    assayData=
+      GSE12767$unnorm[rownames(GSE12767$fData),rownames(GSE12767$pData)] %>%
+      exprs()
+    ,phenoData=
+      AnnotatedDataFrame(GSE12767$pData)
+    ,featureData=
+      AnnotatedDataFrame(GSE12767$fData)
+    ,protocolData=
+      protocolData(GSE12767$eset)
+    ,experimentData=
+      experimentData(GSE12767$eset)
+    ,annotation=
+      annotation(GSE12767$eset)
+  ) %>%
+  .[!(rownames(.) %in% GSE12767$low_exp_probes)
+    ,!(colnames(.) %in% GSE12767$outliers)
+  ]
+```
+
+```{r GSE12767 - Summarize to HGNC symbol, include=FALSE}
+GSE12767$sum_to_hgnc=
+  collapseRows(
+    datET=
+      exprs(GSE12767$filt_eset)
+    ,rowID=
+      rownames(GSE12767$filt_eset)
+    ,rowGroup=
+      fData(GSE12767$filt_eset)['hgnc_symbol'] %>%
+      as.list() %>%
+      unlist()
+  )
+```
+
+```{r GSE12767 - HGNC expression set, include=FALSE}
+GSE12767$hgnc_eset=
+  ExpressionSet(
+    assayData=
+      GSE12767$sum_to_hgnc$datETcollapsed
+    ,phenoData=
+      AnnotatedDataFrame(pData(GSE12767$filt_eset))
+    ,featureData=
+      GSE12767$sum_to_hgnc$group2row %>%
+      as.data.frame() %>%
+      setNames(c('hgnc_symbol','probe_id')) %>%
+      left_join(
+        GSE12767$fData %>%
+          rownames_to_column(var='probe_id')
+        ,by=c('hgnc_symbol','probe_id')
+      ) %>%
+      column_to_rownames(var='hgnc_symbol') %>% 
+      AnnotatedDataFrame()
+    ,protocolData=
+      protocolData(GSE12767$filt_eset)
+    ,experimentData=
+      experimentData(GSE12767$filt_eset)
+    ,annotation=
+      annotation(GSE12767$filt_eset)
+  )
+```
+
+## GSE9984
+
+```{r GSE9984 - Visit experiment page and create list-folder, include=FALSE}
+# Visit https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE9984
+
+GSE9984=list()
+
+GSE9984$folder='raw_data/GSE9984/'
+
+if(!dir.exists(GSE9984$folder)){
+  GSE9984$folder %>%
+    dir.create(recursive=T)
+}
+```
+
+```{r GSE9984 - Expression set, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 00s
+  # Downloaded on 2023-07-28
+  curl::curl_download(
+    paste0(
+      'https://ftp.ncbi.nlm.nih.gov/geo/series/'
+      ,'GSE9nnn/GSE9984/matrix/GSE9984_series_matrix.txt.gz'
+    )
+    ,paste0(
+      GSE9984$folder
+      ,'GSE9984_series_matrix.txt.gz'
+    )
+  )
+}
+
+GSE9984$eset=
+  GEOquery::getGEO(
+    filename='raw_data/GSE9984/GSE9984_series_matrix.txt.gz'
+    ,destdir='raw_data/GSE9984/'
+    ,GSEMatrix=T
+    ,getGPL=F
+    ,AnnotGPL=F
+    ,parseCharacteristics=F
+  )
+```
+
+```{r GSE9984 - Phenotype data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 12m 15s
+  # Downloaded on 2023-07-28
+  curl::curl_download(
+    paste0(
+      'https://www.ncbi.nlm.nih.gov/geo/download/'
+      ,'?acc=GSE9984&format=file'
+    )
+    ,paste0(
+      GSE9984$folder
+      ,'GSE9984_RAW.tar'
+    )
+  )
+  
+  paste0(
+      GSE9984$folder
+      ,'GSE9984_RAW.tar'
+    ) %>%
+    untar(
+      exdir=
+        paste0(
+          GSE9984$folder
+          ,'raw'
+        )
+    )
+  
+  paste0(
+      GSE9984$folder
+      ,'GSE9984_RAW.tar'
+    ) %>%
+    file.remove()
+}
+
+GSE9984$pData=
+  list.files('raw_data/GSE9984/raw') %>%
+  data.frame() %>%
+  setNames('path') %>%
+  mutate(
+    id=
+      path %>%
+      str_extract_all('GSM[:digit:]+') %>%
+      sapply(\(x)x[[1]])
+  ) %>%
+  right_join(
+    pData(GSE9984$eset) %>%
+      rownames_to_column(var='id')
+    ,by='id'
+  ) %>%
+  column_to_rownames(var='id') %>%
+  .[colnames(GSE9984$eset),]
+```
+
+```{r GSE9984 - Assay data, include=FALSE}
+GSE9984$raw=
+  read.celfiles(
+    paste0('raw_data/GSE9984/raw/',GSE9984$pData$path)
+    ,sampleNames=colnames(GSE9984$eset)
+  )
+
+if(all(c(1,2)%in%comp_req)){ # 02m 07s
+  GSE9984$unnorm=
+    GSE9984$raw %>%
+    rma(background=T,normalize=F)
+  
+  GSE9984$unnorm %>%
+    saveRDS('raw_data/GSE9984/GSE9984_unnorm.rds')
+  
+  GSE9984$norm=
+    GSE9984$raw %>%
+    rma(background=T,normalize=T)
+  
+  GSE9984$norm %>%
+    saveRDS('raw_data/GSE9984/GSE9984_norm.rds')
+}else{
+  GSE9984$unnorm=
+    readRDS('raw_data/GSE9984/GSE9984_unnorm.rds')
+  
+  GSE9984$norm=
+    readRDS('raw_data/GSE9984/GSE9984_norm.rds')
+}
+```
+
+```{r GSE9984 - Feature data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 11s
+  # Downloaded on 2023-07-28
+  GSE9984$fData=
+    download_annotation(
+      platform='affy_hg_u133_plus_2'
+      ,mart=ensembl
+    ) %>%
+    .[intersect(rownames(GSE9984$norm),rownames(.)),]
+  
+  GSE9984$fData %>%
+    saveRDS('raw_data/GSE9984/GSE9984_fData.rds')
+}else{
+  GSE9984$fData=
+    readRDS('raw_data/GSE9984/GSE9984_fData.rds')
+}
+```
+
+```{r GSE9984 - Sample outliers by RLE (SOR), include=FALSE}
+GSE9984$RLE_data=
+  suspected_outliers(GSE9984$unnorm)
+```
+
+```{r GSE9984 - Plot SOR, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+GSE9984$RLE_data %>%
+  ggplot(aes(x=sample_id,y=RLE,fill=suspect_outlier)) +
+  geom_boxplot(outlier.shape=NA) +
+  theme_minimal() +
+  theme(axis.text.x=element_blank())
+```
+
+```{r GSE9984 - Sample outliers by HClust (SOH), include=FALSE}
+GSE9984$sample_hclust=
+  parallelDist(
+    t(exprs(GSE9984$unnorm))
+    ,method='manhattan'
+  ) %>%
+  hclust(method='complete')
+```
+
+```{r GSE9984 - Sample outliers (SO), include=FALSE}
+GSE9984$outliers=
+  cutree(GSE9984$sample_hclust,k=4) %>%
+  .[. %in% c(3,4)] %>%
+  names() %>%
+  intersect(
+    GSE9984$RLE_data %>%
+      filter(suspect_outlier=='yes') %>%
+      .$sample_id %>%
+      .[!duplicated(.)]
+  )
+
+GSE9984$sample_hclust$labels=
+  ifelse(
+    GSE9984$sample_hclust$labels %in% GSE9984$outliers
+    ,GSE9984$sample_hclust$labels
+    ,''
+  )
+```
+
+```{r GSE9984 - Plot SO, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+plot(GSE9984$sample_hclust,cex=0.6)
+rect.hclust(GSE9984$sample_hclust,k=4,border=2:5)
+```
+
+```{r GSE9984 - Low-expressed probes (LEP), include=FALSE}
+GSE9984$low_exp_probes=
+  rownames(GSE9984$norm) %>%
+  .[rowMedians(exprs(GSE9984$norm))
+    <=quantile(
+      rowMedians(exprs(GSE9984$norm))
+      ,GSE9984$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ]
+```
+
+```{r GSE9984 - LEP, eval=FALSE, fig.height=3.5, fig.width=3.5, include=FALSE}
+GSE9984$norm %>%
+  exprs() %>%
+  rowMedians() %>%
+  hist(100)
+
+abline(
+  v=quantile(
+      rowMedians(exprs(GSE9984$norm))
+      ,GSE9984$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ,col=2
+  ,lwd=3
+)
+```
+
+```{r GSE9984 - New expression set without LEP and SO, include=FALSE}
+GSE9984$filt_eset=
+  ExpressionSet(
+    assayData=
+      GSE9984$unnorm[rownames(GSE9984$fData),rownames(GSE9984$pData)] %>%
+      exprs()
+    ,phenoData=
+      AnnotatedDataFrame(GSE9984$pData)
+    ,featureData=
+      AnnotatedDataFrame(GSE9984$fData)
+    ,protocolData=
+      protocolData(GSE9984$eset)
+    ,experimentData=
+      experimentData(GSE9984$eset)
+    ,annotation=
+      annotation(GSE9984$eset)
+  ) %>%
+  .[!(rownames(.) %in% GSE9984$low_exp_probes)
+    ,!(colnames(.) %in% GSE9984$outliers)
+  ]
+```
+
+```{r GSE9984 - Summarize to HGNC symbol, include=FALSE}
+GSE9984$sum_to_hgnc=
+  collapseRows(
+    datET=
+      exprs(GSE9984$filt_eset)
+    ,rowID=
+      rownames(GSE9984$filt_eset)
+    ,rowGroup=
+      fData(GSE9984$filt_eset)['hgnc_symbol'] %>%
+      as.list() %>%
+      unlist()
+  )
+```
+
+```{r GSE9984 - HGNC expression set, include=FALSE}
+GSE9984$hgnc_eset=
+  ExpressionSet(
+    assayData=
+      GSE9984$sum_to_hgnc$datETcollapsed
+    ,phenoData=
+      AnnotatedDataFrame(pData(GSE9984$filt_eset))
+    ,featureData=
+      GSE9984$sum_to_hgnc$group2row %>%
+      as.data.frame() %>%
+      setNames(c('hgnc_symbol','probe_id')) %>%
+      left_join(
+        GSE9984$fData %>%
+          rownames_to_column(var='probe_id')
+        ,by=c('hgnc_symbol','probe_id')
+      ) %>%
+      column_to_rownames(var='hgnc_symbol') %>% 
+      AnnotatedDataFrame()
+    ,protocolData=
+      protocolData(GSE9984$filt_eset)
+    ,experimentData=
+      experimentData(GSE9984$filt_eset)
+    ,annotation=
+      annotation(GSE9984$filt_eset)
+  )
+```
+
+## GSE30186
+
+```{r GSE30186 - Visit experiment page and create list-folder, include=FALSE}
+# Visit https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE30186
+
+GSE30186=list()
+
+GSE30186$folder='raw_data/GSE30186/'
+
+if(!dir.exists(GSE30186$folder)){
+  GSE30186$folder %>%
+    dir.create(recursive=T)
+}
+```
+
+```{r GSE30186 - Expression set, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 02s
+  # Downloaded on 2023-07-30
+  curl::curl_download(
+    paste0(
+      'https://ftp.ncbi.nlm.nih.gov/geo/series/'
+      ,'GSE30nnn/GSE30186/matrix/GSE30186_series_matrix.txt.gz'
+    )
+    ,paste0(
+      GSE30186$folder
+      ,'GSE30186_series_matrix.txt.gz'
+    )
+  )
+}
+
+GSE30186$eset=
+  GEOquery::getGEO(
+    filename='raw_data/GSE30186/GSE30186_series_matrix.txt.gz'
+    ,destdir='raw_data/GSE30186/'
+    ,GSEMatrix=T
+    ,getGPL=F
+    ,AnnotGPL=F
+    ,parseCharacteristics=F
+  )
+```
+
+```{r GSE30186 - Phenotype data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 12m 15s
+  # Downloaded on 2023-07-30
+  curl::curl_download(
+    paste0(
+      'https://www.ncbi.nlm.nih.gov/geo/download/'
+      ,'?acc=GSE30186&format=file'
+    )
+    ,paste0(
+      GSE30186$folder
+      ,'GSE30186_RAW.tar'
+    )
+  )
+  
+  paste0(
+      GSE30186$folder
+      ,'GSE30186_RAW.tar'
+    ) %>%
+    untar(
+      exdir=
+        paste0(
+          GSE30186$folder
+          ,'raw'
+        )
+    )
+  
+  paste0(
+      GSE30186$folder
+      ,'GSE30186_RAW.tar'
+    ) %>%
+    file.remove()
+  
+  paste0(
+      GSE30186$folder
+      ,'raw'
+    ) %>%
+    list.files(full.names=T) %>%
+    lapply(R.utils::gunzip)
+}
+
+GSE30186$pData=
+  GSE30186$eset %>%
+  pData() %>%
+  mutate(path=NA) %>%
+  select(path,everything())
+```
+
+```{r GSE30186 - Assay data, include=FALSE}
+GSE30186$raw=
+  GSE30186$eset
+
+if(all(c(1,2)%in%comp_req)){ # 02m 07s
+  GSE30186$unnorm=
+    GSE30186$eset %>%
+    backgroundCorrect.matrix() %>%
+    oligo::summarize(probes=rownames(.)) %>%
+    .[rownames(fData(GSE30186$eset)),] %>%
+    ExpressionSet(
+      assayData=.
+      ,phenoData=AnnotatedDataFrame(GSE30186$pData)
+      ,featureData=AnnotatedDataFrame(fData(GSE30186$eset))
+      ,protocolData=protocolData(GSE30186$eset)
+      ,experimentData=experimentData(GSE30186$eset)
+      ,annotation=annotation(GSE30186$eset)
+    )
+  
+  saveRDS(GSE30186$unnorm,'raw_data/GSE30186/GSE30186_unnorm.rds')
+  
+  GSE30186$norm=
+    GSE30186$eset %>%
+    backgroundCorrect.matrix() %>%
+    oligo::normalize() %>%
+    `dimnames<-`(dimnames(GSE30186$eset)) %>%
+    oligo::summarize(probes=rownames(.)) %>%
+    .[rownames(fData(GSE30186$eset)),] %>%
+    ExpressionSet(
+      assayData=.
+      ,phenoData=AnnotatedDataFrame(GSE30186$pData)
+      ,featureData=AnnotatedDataFrame(fData(GSE30186$eset))
+      ,protocolData=protocolData(GSE30186$eset)
+      ,experimentData=experimentData(GSE30186$eset)
+      ,annotation=annotation(GSE30186$eset)
+    )
+  
+  saveRDS(GSE30186$norm,'raw_data/GSE30186/GSE30186_norm.rds')
+}else{
+  GSE30186$unnorm=
+    readRDS('raw_data/GSE30186/GSE30186_unnorm.rds')
+  
+  GSE30186$norm=
+    readRDS('raw_data/GSE30186/GSE30186_norm.rds')
+}
+```
+
+```{r GSE30186 - Feature data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 11s
+  # Downloaded on 2023-07-30
+  curl::curl_download(
+    paste0(
+      'https://ftp.ncbi.nlm.nih.gov/geo/platforms/'
+      ,'GPL10nnn/GPL10558/annot/GPL10558.annot.gz'
+    )
+    ,paste0(
+      GSE30186$folder
+      ,'GPL10558.annot.gz'
+    )
+  )
+  
+  GSE30186$fData=
+    paste0(
+      GSE30186$folder
+      ,'GPL10558.annot.gz'
+    ) %>%
+    download_annotation_by_file(
+      skip_rows=28
+      ,mart=ensembl
+    )
+  
+  GSE30186$fData %>%
+    saveRDS('raw_data/GSE30186/GSE30186_fData.rds')
+}else{
+  GSE30186$fData=
+    readRDS('raw_data/GSE30186/GSE30186_fData.rds')
+}
+```
+
+```{r GSE30186 - Sample outliers by RLE (SOR), include=FALSE}
+GSE30186$RLE_data=
+  suspected_outliers(GSE30186$unnorm)
+```
+
+```{r GSE30186 - Plot SOR, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+GSE30186$RLE_data %>%
+  ggplot(aes(x=sample_id,y=RLE,fill=suspect_outlier)) +
+  geom_boxplot(outlier.shape=NA) +
+  theme_minimal() +
+  theme(axis.text.x=element_blank())
+```
+
+```{r GSE30186 - Sample outliers by HClust (SOH), include=FALSE}
+GSE30186$sample_hclust=
+  parallelDist(
+    t(exprs(GSE30186$unnorm))
+    ,method='manhattan'
+  ) %>%
+  hclust(method='complete')
+```
+
+```{r GSE30186 - Sample outliers (SO), include=FALSE}
+GSE30186$outliers=
+  cutree(GSE30186$sample_hclust,k=4) %>%
+  .[. %in% 3:4] %>%
+  names() %>%
+  intersect(
+    GSE30186$RLE_data %>%
+      filter(suspect_outlier=='yes') %>%
+      .$sample_id %>%
+      .[!duplicated(.)]
+  )
+
+GSE30186$sample_hclust$labels=
+  ifelse(
+    GSE30186$sample_hclust$labels %in% GSE30186$outliers
+    ,GSE30186$sample_hclust$labels
+    ,''
+  )
+```
+
+```{r GSE30186 - Plot SO, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+plot(GSE30186$sample_hclust,cex=0.6)
+rect.hclust(GSE30186$sample_hclust,k=4,border=2:5)
+```
+
+```{r GSE30186 - Low-expressed probes (LEP), include=FALSE}
+GSE30186$low_exp_probes=
+  rownames(GSE30186$norm) %>%
+  .[rowMedians(exprs(GSE30186$norm))
+    <=quantile(
+      rowMedians(exprs(GSE30186$norm))
+      ,GSE30186$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ]
+```
+
+```{r GSE30186 - LEP, eval=FALSE, fig.height=3.5, fig.width=3.5, include=FALSE}
+GSE30186$norm %>%
+  exprs() %>%
+  rowMedians() %>%
+  hist(100)
+
+abline(
+  v=quantile(
+      rowMedians(exprs(GSE30186$norm))
+      ,GSE30186$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ,col=2
+  ,lwd=3
+)
+```
+
+```{r GSE30186 - New expression set without LEP and SO, include=FALSE}
+GSE30186$filt_eset=
+  ExpressionSet(
+    assayData=
+      GSE30186$unnorm[rownames(GSE30186$fData),rownames(GSE30186$pData)] %>%
+      exprs()
+    ,phenoData=
+      AnnotatedDataFrame(GSE30186$pData)
+    ,featureData=
+      AnnotatedDataFrame(GSE30186$fData)
+    ,protocolData=
+      protocolData(GSE30186$eset)
+    ,experimentData=
+      experimentData(GSE30186$eset)
+    ,annotation=
+      annotation(GSE30186$eset)
+  ) %>%
+  .[!(rownames(.) %in% GSE30186$low_exp_probes)
+    ,!(colnames(.) %in% GSE30186$outliers)
+  ]
+```
+
+```{r GSE30186 - Summarize to HGNC symbol, include=FALSE}
+GSE30186$sum_to_hgnc=
+  collapseRows(
+    datET=
+      exprs(GSE30186$filt_eset)
+    ,rowID=
+      rownames(GSE30186$filt_eset)
+    ,rowGroup=
+      fData(GSE30186$filt_eset)['hgnc_symbol'] %>%
+      as.list() %>%
+      unlist()
+  )
+```
+
+```{r GSE30186 - HGNC expression set, include=FALSE}
+GSE30186$hgnc_eset=
+  ExpressionSet(
+    assayData=
+      GSE30186$sum_to_hgnc$datETcollapsed
+    ,phenoData=
+      AnnotatedDataFrame(pData(GSE30186$filt_eset))
+    ,featureData=
+      GSE30186$sum_to_hgnc$group2row %>%
+      as.data.frame() %>%
+      setNames(c('hgnc_symbol','probe_id')) %>%
+      left_join(
+        GSE30186$fData %>%
+          rownames_to_column(var='probe_id')
+        ,by=c('hgnc_symbol','probe_id')
+      ) %>%
+      column_to_rownames(var='hgnc_symbol') %>% 
+      AnnotatedDataFrame()
+    ,protocolData=
+      protocolData(GSE30186$filt_eset)
+    ,experimentData=
+      experimentData(GSE30186$filt_eset)
+    ,annotation=
+      annotation(GSE30186$filt_eset)
+  )
+```
+
+## GSE10588
+
+```{r GSE10588 - Visit experiment page and create list-folder, include=FALSE}
+# Visit https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE10588
+
+GSE10588=list()
+
+GSE10588$folder='raw_data/GSE10588/'
+
+if(!dir.exists(GSE10588$folder)){
+  GSE10588$folder %>%
+    dir.create(recursive=T)
+}
+```
+
+```{r GSE10588 - Expression set, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 03s
+  # Downloaded on 2023-07-30
+  curl::curl_download(
+    paste0(
+      'https://ftp.ncbi.nlm.nih.gov/geo/series/'
+      ,'GSE10nnn/GSE10588/matrix/GSE10588_series_matrix.txt.gz'
+    )
+    ,paste0(
+      GSE10588$folder
+      ,'GSE10588_series_matrix.txt.gz'
+    )
+  )
+}
+
+GSE10588$eset=
+  GEOquery::getGEO(
+    filename='raw_data/GSE10588/GSE10588_series_matrix.txt.gz'
+    ,destdir='raw_data/GSE10588/'
+    ,GSEMatrix=T
+    ,getGPL=F
+    ,AnnotGPL=F
+    ,parseCharacteristics=F
+  )
+```
+
+```{r GSE10588 - Phenotype data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 15s
+  # Downloaded on 2023-07-30
+  curl::curl_download(
+    paste0(
+      'https://www.ncbi.nlm.nih.gov/geo/download/'
+      ,'?acc=GSE10588&format=file'
+    )
+    ,paste0(
+      GSE10588$folder
+      ,'GSE10588_RAW.tar'
+    )
+  )
+  
+  paste0(
+      GSE10588$folder
+      ,'GSE10588_RAW.tar'
+    ) %>%
+    untar(
+      exdir=
+        paste0(
+          GSE10588$folder
+          ,'raw'
+        )
+    )
+  
+  paste0(
+      GSE10588$folder
+      ,'GSE10588_RAW.tar'
+    ) %>%
+    file.remove()
+  
+  paste0(
+      GSE10588$folder
+      ,'raw'
+    ) %>%
+    list.files(full.names=T) %>%
+    lapply(R.utils::gunzip)
+}
+
+GSE10588$pData=
+  list.files('raw_data/GSE10588/raw') %>%
+  data.frame() %>%
+  setNames('path') %>%
+  mutate(
+    id=
+      path %>%
+      str_extract_all('GSM[:digit:]+') %>%
+      sapply(\(x)x[[1]])
+  ) %>%
+  right_join(
+    pData(GSE10588$eset) %>%
+      rownames_to_column(var='id')
+    ,by='id'
+  ) %>%
+  column_to_rownames(var='id') %>%
+  .[colnames(GSE10588$eset),]
+```
+
+```{r GSE10588 - Assay data, include=FALSE}
+GSE10588$raw=
+  GSE10588$eset
+
+if(all(c(1,2)%in%comp_req)){ # 03m 12s
+  GSE10588$unnorm=
+    GSE10588$eset %>%
+    backgroundCorrect.matrix() %>%
+    oligo::summarize(probes=rownames(.)) %>%
+    .[rownames(fData(GSE10588$eset)),] %>%
+    ExpressionSet(
+      assayData=.,
+      phenoData=AnnotatedDataFrame(GSE10588$pData)
+      ,featureData=AnnotatedDataFrame(fData(GSE10588$eset))
+      ,protocolData=protocolData(GSE10588$eset)
+      ,experimentData=experimentData(GSE10588$eset)
+      ,annotation=annotation(GSE10588$eset)
+    )
+  
+  saveRDS(GSE10588$unnorm,'raw_data/GSE10588/GSE10588_unnorm.rds')
+  
+  GSE10588$norm=
+    GSE10588$eset %>%
+    backgroundCorrect.matrix() %>%
+    oligo::normalize() %>%
+    `dimnames<-`(dimnames(GSE10588$eset)) %>%
+    oligo::summarize(probes=rownames(.)) %>%
+    .[rownames(fData(GSE10588$eset)),] %>%
+    ExpressionSet(
+      assayData=.
+      ,phenoData=AnnotatedDataFrame(GSE10588$pData)
+      ,featureData=AnnotatedDataFrame(fData(GSE10588$eset))
+      ,protocolData=protocolData(GSE10588$eset)
+      ,experimentData=experimentData(GSE10588$eset)
+      ,annotation=annotation(GSE10588$eset)
+    )
+  
+  saveRDS(GSE10588$norm,'raw_data/GSE10588/GSE10588_norm.rds')
+}else{
+  GSE10588$unnorm=
+    readRDS('raw_data/GSE10588/GSE10588_unnorm.rds')
+  
+  GSE10588$norm=
+    readRDS('raw_data/GSE10588/GSE10588_norm.rds')
+}
+```
+
+```{r GSE10588 - Feature data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 11s
+  # Downloaded on 2023-07-30
+  curl::curl_download(
+    paste0(
+      'https://ftp.ncbi.nlm.nih.gov/geo/platforms/'
+      ,'GPL2nnn/GPL2986/annot/GPL2986.annot.gz'
+    )
+    ,paste0(
+      GSE10588$folder
+      ,'GPL2986.annot.gz'
+    )
+  )
+  
+  GSE10588$fData=
+    paste0(
+      GSE10588$folder
+      ,'GPL2986.annot.gz'
+    ) %>%
+    download_annotation_by_file(
+      skip_rows=27
+      ,mart=ensembl
+    )
+  
+  GSE10588$fData %>%
+    saveRDS('raw_data/GSE10588/GSE10588_fData.rds')
+}else{
+  GSE10588$fData=
+    readRDS('raw_data/GSE10588/GSE10588_fData.rds')
+}
+```
+
+```{r GSE10588 - Sample outliers by RLE (SOR), include=FALSE}
+GSE10588$RLE_data=
+  suspected_outliers(GSE10588$unnorm)
+```
+
+```{r GSE10588 - Plot SOR, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+GSE10588$RLE_data %>%
+  ggplot(aes(x=sample_id,y=RLE,fill=suspect_outlier)) +
+  geom_boxplot(outlier.shape=NA) +
+  theme_minimal() +
+  theme(axis.text.x=element_blank())
+```
+
+```{r GSE10588 - Sample outliers by HClust (SOH), include=FALSE}
+GSE10588$sample_hclust=
+  parallelDist(
+    t(exprs(GSE10588$unnorm))
+    ,method='manhattan'
+  ) %>%
+  hclust(method='complete')
+```
+
+```{r GSE10588 - Sample outliers (SO), include=FALSE}
+GSE10588$outliers=
+  cutree(GSE10588$sample_hclust,k=4) %>%
+  .[. %in% 3:4] %>%
+  names() %>%
+  intersect(
+    GSE10588$RLE_data %>%
+      filter(suspect_outlier=='yes') %>%
+      .$sample_id %>%
+      .[!duplicated(.)]
+  )
+
+GSE10588$sample_hclust$labels=
+  ifelse(
+    GSE10588$sample_hclust$labels %in% GSE10588$outliers
+    ,GSE10588$sample_hclust$labels
+    ,''
+  )
+```
+
+```{r GSE10588 - Plot SO, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+plot(GSE10588$sample_hclust,cex=0.6)
+rect.hclust(GSE10588$sample_hclust,k=4,border=2:5)
+```
+
+```{r GSE10588 - Low-expressed probes (LEP), include=FALSE}
+GSE10588$low_exp_probes=
+  rownames(GSE10588$norm) %>%
+  .[rowMedians(exprs(GSE10588$norm))
+    <=quantile(
+      rowMedians(exprs(GSE10588$norm))
+      ,GSE10588$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ]
+```
+
+```{r GSE10588 - LEP, eval=FALSE, fig.height=3.5, fig.width=3.5, include=FALSE}
+GSE10588$norm %>%
+  exprs() %>%
+  rowMedians() %>%
+  hist(100)
+
+abline(
+  v=quantile(
+      rowMedians(exprs(GSE10588$norm))
+      ,GSE10588$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ,col=2
+  ,lwd=3
+)
+```
+
+```{r GSE10588 - New expression set without LEP and SO, include=FALSE}
+GSE10588$filt_eset=
+  ExpressionSet(
+    assayData=
+      GSE10588$unnorm[rownames(GSE10588$fData),rownames(GSE10588$pData)] %>%
+      exprs()
+    ,phenoData=
+      AnnotatedDataFrame(GSE10588$pData)
+    ,featureData=
+      AnnotatedDataFrame(GSE10588$fData)
+    ,protocolData=
+      protocolData(GSE10588$eset)
+    ,experimentData=
+      experimentData(GSE10588$eset)
+    ,annotation=
+      annotation(GSE10588$eset)
+  ) %>%
+  .[!(rownames(.) %in% GSE10588$low_exp_probes)
+    ,!(colnames(.) %in% GSE10588$outliers)
+  ]
+```
+
+```{r GSE10588 - Summarize to HGNC symbol, include=FALSE}
+GSE10588$sum_to_hgnc=
+  collapseRows(
+    datET=
+      exprs(GSE10588$filt_eset)
+    ,rowID=
+      rownames(GSE10588$filt_eset)
+    ,rowGroup=
+      fData(GSE10588$filt_eset)['hgnc_symbol'] %>%
+      as.list() %>%
+      unlist()
+  )
+```
+
+```{r GSE10588 - HGNC expression set, include=FALSE}
+GSE10588$hgnc_eset=
+  ExpressionSet(
+    assayData=
+      GSE10588$sum_to_hgnc$datETcollapsed
+    ,phenoData=
+      AnnotatedDataFrame(pData(GSE10588$filt_eset))
+    ,featureData=
+      GSE10588$sum_to_hgnc$group2row %>%
+      as.data.frame() %>%
+      setNames(c('hgnc_symbol','probe_id')) %>%
+      left_join(
+        GSE10588$fData %>%
+          rownames_to_column(var='probe_id')
+        ,by=c('hgnc_symbol','probe_id')
+      ) %>%
+      column_to_rownames(var='hgnc_symbol') %>% 
+      AnnotatedDataFrame()
+    ,protocolData=
+      protocolData(GSE10588$filt_eset)
+    ,experimentData=
+      experimentData(GSE10588$filt_eset)
+    ,annotation=
+      annotation(GSE10588$filt_eset)
+  )
+```
+
+## GSE24129
+
+```{r GSE24129 - Visit experiment page and create list-folder, include=FALSE}
+# Visit https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE24129
+
+GSE24129=list()
+
+GSE24129$folder='raw_data/GSE24129/'
+
+if(!dir.exists(GSE24129$folder)){
+  GSE24129$folder %>%
+    dir.create(recursive=T)
+}
+```
+
+```{r GSE24129 - Expression set, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 03s
+  # Downloaded on 2023-07-30
+  curl::curl_download(
+    paste0(
+      'https://ftp.ncbi.nlm.nih.gov/geo/series/'
+      ,'GSE24nnn/GSE24129/matrix/GSE24129_series_matrix.txt.gz'
+    )
+    ,paste0(
+      GSE24129$folder
+      ,'GSE24129_series_matrix.txt.gz'
+    )
+  )
+}
+
+GSE24129$eset=
+  GEOquery::getGEO(
+    filename='raw_data/GSE24129/GSE24129_series_matrix.txt.gz'
+    ,destdir='raw_data/GSE24129/'
+    ,GSEMatrix=T
+    ,getGPL=F
+    ,AnnotGPL=F
+    ,parseCharacteristics=F
+  )
+```
+
+```{r GSE24129 - Phenotype data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 02m 10s
+  # Downloaded on 2023-07-30
+  curl::curl_download(
+    paste0(
+      'https://www.ncbi.nlm.nih.gov/geo/download/'
+      ,'?acc=GSE24129&format=file'
+    )
+    ,paste0(
+      GSE24129$folder
+      ,'GSE24129_RAW.tar'
+    )
+  )
+  
+  paste0(
+      GSE24129$folder
+      ,'GSE24129_RAW.tar'
+    ) %>%
+    untar(
+      exdir=
+        paste0(
+          GSE24129$folder
+          ,'raw'
+        )
+    )
+  
+  paste0(
+      GSE24129$folder
+      ,'GSE24129_RAW.tar'
+    ) %>%
+    file.remove()
+}
+
+GSE24129$pData=
+  list.files('raw_data/GSE24129/raw') %>%
+  data.frame() %>%
+  setNames('path') %>%
+  mutate(
+    id=
+      path %>%
+      str_extract_all('GSM[:digit:]+') %>%
+      sapply(\(x)x[[1]])
+  ) %>%
+  right_join(
+    pData(GSE24129$eset) %>%
+      rownames_to_column(var='id')
+    ,by='id'
+  ) %>%
+  column_to_rownames(var='id') %>%
+  .[colnames(GSE24129$eset),]
+```
+
+```{r GSE24129 - Assay data, include=FALSE}
+GSE24129$raw=
+  read.celfiles(
+    paste0('raw_data/GSE24129/raw/',GSE24129$pData$path)
+    ,sampleNames=colnames(GSE24129$eset)
+  )
+
+if(all(c(1,2)%in%comp_req)){ # 02m 45s
+  GSE24129$unnorm=
+    GSE24129$raw %>%
+    rma(background=T,normalize=F)
+  
+  GSE24129$unnorm %>%
+    saveRDS('raw_data/GSE24129/GSE24129_unnorm.rds')
+  
+  GSE24129$norm=
+    GSE24129$raw %>%
+    rma(background=T,normalize=T)
+  
+  GSE24129$norm %>%
+    saveRDS('raw_data/GSE24129/GSE24129_norm.rds')
+}else{
+  GSE24129$unnorm=
+    readRDS('raw_data/GSE24129/GSE24129_unnorm.rds')
+  
+  GSE24129$norm=
+    readRDS('raw_data/GSE24129/GSE24129_norm.rds')
+}
+```
+
+```{r GSE24129 - Feature data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 01s
+  # Downloaded on 2023-07-30
+  GSE24129$fData=
+    download_annotation(
+      platform='affy_hugene_1_0_st_v1'
+      ,mart=ensembl
+    ) %>%
+    .[intersect(rownames(GSE24129$norm),rownames(.)),]
+  
+  GSE24129$fData %>%
+    saveRDS('raw_data/GSE24129/GSE24129_fData.rds')
+}else{
+  GSE24129$fData=
+    readRDS('raw_data/GSE24129/GSE24129_fData.rds')
+}
+```
+
+```{r GSE24129 - Sample outliers by RLE (SOR), include=FALSE}
+GSE24129$RLE_data=
+  suspected_outliers(GSE24129$unnorm)
+```
+
+```{r GSE24129 - Plot SOR, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+GSE24129$RLE_data %>%
+  ggplot(aes(x=sample_id,y=RLE,fill=suspect_outlier)) +
+  geom_boxplot(outlier.shape=NA) +
+  theme_minimal() +
+  theme(axis.text.x=element_blank())
+```
+
+```{r GSE24129 - Sample outliers by HClust (SOH), include=FALSE}
+GSE24129$sample_hclust=
+  parallelDist(
+    t(exprs(GSE24129$unnorm))
+    ,method='manhattan'
+  ) %>%
+  hclust(method='complete')
+```
+
+```{r GSE24129 - Sample outliers (SO), include=FALSE}
+GSE24129$outliers=
+  cutree(GSE24129$sample_hclust,k=3) %>%
+  .[. %in% 3] %>%
+  names() %>%
+  intersect(
+    GSE24129$RLE_data %>%
+      filter(suspect_outlier=='yes') %>%
+      .$sample_id %>%
+      .[!duplicated(.)]
+  )
+
+GSE24129$sample_hclust$labels=
+  ifelse(
+    GSE24129$sample_hclust$labels %in% GSE24129$outliers
+    ,GSE24129$sample_hclust$labels
+    ,''
+  )
+```
+
+```{r GSE24129 - Plot SO, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+plot(GSE24129$sample_hclust,cex=0.6)
+rect.hclust(GSE24129$sample_hclust,k=3,border=2:4)
+```
+
+```{r GSE24129 - Low-expressed probes (LEP), include=FALSE}
+GSE24129$low_exp_probes=
+  rownames(GSE24129$norm) %>%
+  .[rowMedians(exprs(GSE24129$norm))
+    <=quantile(
+      rowMedians(exprs(GSE24129$norm))
+      ,GSE24129$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ]
+```
+
+```{r GSE24129 - LEP, eval=FALSE, fig.height=3.5, fig.width=3.5, include=FALSE}
+GSE24129$norm %>%
+  exprs() %>%
+  rowMedians() %>%
+  hist(100)
+
+abline(
+  v=quantile(
+      rowMedians(exprs(GSE24129$norm))
+      ,GSE24129$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ,col=2
+  ,lwd=3
+)
+```
+
+```{r GSE24129 - New expression set without LEP and SO, include=FALSE}
+GSE24129$filt_eset=
+  ExpressionSet(
+    assayData=
+      GSE24129$unnorm[rownames(GSE24129$fData),rownames(GSE24129$pData)] %>%
+      exprs()
+    ,phenoData=
+      AnnotatedDataFrame(GSE24129$pData)
+    ,featureData=
+      AnnotatedDataFrame(GSE24129$fData)
+    ,protocolData=
+      protocolData(GSE24129$eset)
+    ,experimentData=
+      experimentData(GSE24129$eset)
+    ,annotation=
+      annotation(GSE24129$eset)
+  ) %>%
+  .[!(rownames(.) %in% GSE24129$low_exp_probes)
+    ,!(colnames(.) %in% GSE24129$outliers)
+  ]
+```
+
+```{r GSE24129 - Summarize to HGNC symbol, include=FALSE}
+GSE24129$sum_to_hgnc=
+  collapseRows(
+    datET=
+      exprs(GSE24129$filt_eset)
+    ,rowID=
+      rownames(GSE24129$filt_eset)
+    ,rowGroup=
+      fData(GSE24129$filt_eset)['hgnc_symbol'] %>%
+      as.list() %>%
+      unlist()
+  )
+```
+
+```{r GSE24129 - HGNC expression set, include=FALSE}
+GSE24129$hgnc_eset=
+  ExpressionSet(
+    assayData=
+      GSE24129$sum_to_hgnc$datETcollapsed
+    ,phenoData=
+      AnnotatedDataFrame(pData(GSE24129$filt_eset))
+    ,featureData=
+      GSE24129$sum_to_hgnc$group2row %>%
+      as.data.frame() %>%
+      setNames(c('hgnc_symbol','probe_id')) %>%
+      left_join(
+        GSE24129$fData %>%
+          rownames_to_column(var='probe_id')
+        ,by=c('hgnc_symbol','probe_id')
+      ) %>%
+      column_to_rownames(var='hgnc_symbol') %>% 
+      AnnotatedDataFrame()
+    ,protocolData=
+      protocolData(GSE24129$filt_eset)
+    ,experimentData=
+      experimentData(GSE24129$filt_eset)
+    ,annotation=
+      annotation(GSE24129$filt_eset)
+  )
+```
+
+## GSE25906
+
+```{r GSE25906 - Visit experiment page and create list-folder, include=FALSE}
+# Visit https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE25906
+
+GSE25906=list()
+
+GSE25906$folder='raw_data/GSE25906/'
+
+if(!dir.exists(GSE25906$folder)){
+  GSE25906$folder %>%
+    dir.create(recursive=T)
+}
+```
+
+```{r GSE25906 - Expression set, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 06s
+  # Downloaded on 2023-07-30
+  curl::curl_download(
+    paste0(
+      'https://ftp.ncbi.nlm.nih.gov/geo/series/'
+      ,'GSE25nnn/GSE25906/matrix/GSE25906_series_matrix.txt.gz'
+    )
+    ,paste0(
+      GSE25906$folder
+      ,'GSE25906_series_matrix.txt.gz'
+    )
+  )
+}
+
+GSE25906$eset=
+  GEOquery::getGEO(
+    filename='raw_data/GSE25906/GSE25906_series_matrix.txt.gz'
+    ,destdir='raw_data/GSE25906/'
+    ,GSEMatrix=T
+    ,getGPL=F
+    ,AnnotGPL=F
+    ,parseCharacteristics=F
+  )
+```
+
+```{r GSE25906 - Phenotype data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 02m 10s
+  # Downloaded on 2023-07-30
+  curl::curl_download(
+    paste0(
+      'https://www.ncbi.nlm.nih.gov/geo/download/'
+      ,'?acc=GSE25906&format=file'
+    )
+    ,paste0(
+      GSE25906$folder
+      ,'GSE25906_RAW.tar'
+    )
+  )
+  
+  paste0(
+      GSE25906$folder
+      ,'GSE25906_RAW.tar'
+    ) %>%
+    untar(
+      exdir=
+        paste0(
+          GSE25906$folder
+          ,'raw'
+        )
+    )
+  
+  paste0(
+      GSE25906$folder
+      ,'GSE25906_RAW.tar'
+    ) %>%
+    file.remove()
+  
+  paste0(
+      GSE25906$folder
+      ,'raw'
+    ) %>%
+    list.files(full.names=T) %>%
+    lapply(R.utils::gunzip)
+}
+
+GSE25906$pData=
+  GSE25906$eset %>%
+  pData() %>%
+  mutate(path=NA) %>%
+  select(path,everything())
+```
+
+```{r GSE25906 - Assay data, include=FALSE}
+GSE25906$raw=
+  GSE25906$eset
+
+if(all(c(1,2)%in%comp_req)){ # 02m 07s
+  GSE25906$unnorm=
+    GSE25906$eset %>%
+    backgroundCorrect.matrix() %>%
+    oligo::summarize(probes=rownames(.)) %>%
+    .[rownames(fData(GSE25906$eset)),] %>%
+    ExpressionSet(
+      assayData=.
+      ,phenoData=AnnotatedDataFrame(GSE25906$pData)
+      ,featureData=AnnotatedDataFrame(fData(GSE25906$eset))
+      ,protocolData=protocolData(GSE25906$eset)
+      ,experimentData=experimentData(GSE25906$eset)
+      ,annotation=annotation(GSE25906$eset)
+    )
+  
+  saveRDS(GSE25906$unnorm,'raw_data/GSE25906/GSE25906_unnorm.rds')
+  
+  GSE25906$norm=
+    GSE25906$eset %>%
+    backgroundCorrect.matrix() %>%
+    oligo::normalize() %>%
+    `dimnames<-`(dimnames(GSE25906$eset)) %>%
+    oligo::summarize(probes=rownames(.)) %>%
+    .[rownames(fData(GSE25906$eset)),] %>%
+    ExpressionSet(
+      assayData=.
+      ,phenoData=AnnotatedDataFrame(GSE25906$pData)
+      ,featureData=AnnotatedDataFrame(fData(GSE25906$eset))
+      ,protocolData=protocolData(GSE25906$eset)
+      ,experimentData=experimentData(GSE25906$eset)
+      ,annotation=annotation(GSE25906$eset)
+    )
+  
+  saveRDS(GSE25906$norm,'raw_data/GSE25906/GSE25906_norm.rds')
+}else{
+  GSE25906$unnorm=
+    readRDS('raw_data/GSE25906/GSE25906_unnorm.rds')
+  
+  GSE25906$norm=
+    readRDS('raw_data/GSE25906/GSE25906_norm.rds')
+}
+```
+
+```{r GSE25906 - Feature data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 11s
+  # Downloaded on 2023-07-30
+  curl::curl_download(
+    paste0(
+      'https://ftp.ncbi.nlm.nih.gov/geo/platforms/'
+      ,'GPL6nnn/GPL6102/annot/GPL6102.annot.gz'
+    )
+    ,paste0(
+      GSE25906$folder
+      ,'GPL6102.annot.gz'
+    )
+  )
+  
+  GSE25906$fData=
+    paste0(
+      GSE25906$folder
+      ,'GPL6102.annot.gz'
+    ) %>%
+    download_annotation_by_file(
+      skip_rows=28
+      ,mart=ensembl
+    )
+  
+  GSE25906$fData %>%
+    saveRDS('raw_data/GSE25906/GSE25906_fData.rds')
+}else{
+  GSE25906$fData=
+    readRDS('raw_data/GSE25906/GSE25906_fData.rds')
+}
+```
+
+```{r GSE25906 - Sample outliers by RLE (SOR), include=FALSE}
+GSE25906$RLE_data=
+  suspected_outliers(GSE25906$unnorm)
+```
+
+```{r GSE25906 - Plot SOR, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+GSE25906$RLE_data %>%
+  ggplot(aes(x=sample_id,y=RLE,fill=suspect_outlier)) +
+  geom_boxplot(outlier.shape=NA) +
+  theme_minimal() +
+  theme(axis.text.x=element_blank())
+```
+
+```{r GSE25906 - Sample outliers by HClust (SOH), include=FALSE}
+GSE25906$sample_hclust=
+  parallelDist(
+    t(exprs(GSE25906$unnorm))
+    ,method='manhattan'
+  ) %>%
+  hclust(method='complete')
+```
+
+```{r GSE25906 - Sample outliers (SO), include=FALSE}
+GSE25906$outliers=
+  cutree(GSE25906$sample_hclust,k=4) %>%
+  .[. %in% 3:4] %>%
+  names() %>%
+  intersect(
+    GSE25906$RLE_data %>%
+      filter(suspect_outlier=='yes') %>%
+      .$sample_id %>%
+      .[!duplicated(.)]
+  )
+
+GSE25906$sample_hclust$labels=
+  ifelse(
+    GSE25906$sample_hclust$labels %in% GSE25906$outliers
+    ,GSE25906$sample_hclust$labels
+    ,''
+  )
+```
+
+```{r GSE25906 - Plot SO, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+plot(GSE25906$sample_hclust,cex=0.6)
+rect.hclust(GSE25906$sample_hclust,k=4,border=2:5)
+```
+
+```{r GSE25906 - Low-expressed probes (LEP), include=FALSE}
+GSE25906$low_exp_probes=
+  rownames(GSE25906$norm) %>%
+  .[rowMedians(exprs(GSE25906$norm))
+    <=quantile(
+      rowMedians(exprs(GSE25906$norm))
+      ,GSE25906$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ]
+```
+
+```{r GSE25906 - LEP, eval=FALSE, fig.height=3.5, fig.width=3.5, include=FALSE}
+GSE25906$norm %>%
+  exprs() %>%
+  rowMedians() %>%
+  hist(100)
+
+abline(
+  v=quantile(
+      rowMedians(exprs(GSE25906$norm))
+      ,GSE25906$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ,col=2
+  ,lwd=3
+)
+```
+
+```{r GSE25906 - New expression set without LEP and SO, include=FALSE}
+GSE25906$filt_eset=
+  ExpressionSet(
+    assayData=
+      GSE25906$unnorm[
+        GSE25906$fData %>%
+          .[intersect(rownames(.),rownames(GSE25906$unnorm)),] %>%
+          rownames()
+        ,rownames(GSE25906$pData)
+      ] %>%
+      exprs()
+    ,phenoData=
+      AnnotatedDataFrame(GSE25906$pData)
+    ,featureData=
+      GSE25906$fData %>%
+      .[intersect(rownames(.),rownames(GSE25906$unnorm)),] %>%
+      AnnotatedDataFrame()
+    ,protocolData=
+      protocolData(GSE25906$eset)
+    ,experimentData=
+      experimentData(GSE25906$eset)
+    ,annotation=
+      annotation(GSE25906$eset)
+  ) %>%
+  .[!(rownames(.) %in% GSE25906$low_exp_probes)
+    ,!(colnames(.) %in% GSE25906$outliers)
+  ]
+```
+
+```{r GSE25906 - Summarize to HGNC symbol, include=FALSE}
+GSE25906$sum_to_hgnc=
+  collapseRows(
+    datET=
+      exprs(GSE25906$filt_eset)
+    ,rowID=
+      rownames(GSE25906$filt_eset)
+    ,rowGroup=
+      fData(GSE25906$filt_eset)['hgnc_symbol'] %>%
+      as.list() %>%
+      unlist()
+  )
+```
+
+```{r GSE25906 - HGNC expression set, include=FALSE}
+GSE25906$hgnc_eset=
+  ExpressionSet(
+    assayData=
+      GSE25906$sum_to_hgnc$datETcollapsed
+    ,phenoData=
+      AnnotatedDataFrame(pData(GSE25906$filt_eset))
+    ,featureData=
+      GSE25906$sum_to_hgnc$group2row %>%
+      as.data.frame() %>%
+      setNames(c('hgnc_symbol','probe_id')) %>%
+      left_join(
+        GSE25906$fData %>%
+          rownames_to_column(var='probe_id')
+        ,by=c('hgnc_symbol','probe_id')
+      ) %>%
+      column_to_rownames(var='hgnc_symbol') %>% 
+      AnnotatedDataFrame()
+    ,protocolData=
+      protocolData(GSE25906$filt_eset)
+    ,experimentData=
+      experimentData(GSE25906$filt_eset)
+    ,annotation=
+      annotation(GSE25906$filt_eset)
+  )
+```
+
+## GSE4707
+
+```{r GSE4707 - Visit experiment page and create list-folder, include=FALSE}
+# Visit https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE4707
+
+GSE4707=list()
+
+GSE4707$folder='raw_data/GSE4707/'
+
+if(!dir.exists(GSE4707$folder)){
+  GSE4707$folder %>%
+    dir.create(recursive=T)
+}
+```
+
+```{r GSE4707 - Expression set, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 07s
+  # Downloaded on 2023-07-30
+  curl::curl_download(
+    paste0(
+      'https://ftp.ncbi.nlm.nih.gov/geo/series/'
+      ,'GSE4nnn/GSE4707/matrix/GSE4707_series_matrix.txt.gz'
+    )
+    ,paste0(
+      GSE4707$folder
+      ,'GSE4707_series_matrix.txt.gz'
+    )
+  )
+}
+
+GSE4707$eset=
+  GEOquery::getGEO(
+    filename='raw_data/GSE4707/GSE4707_series_matrix.txt.gz'
+    ,destdir='raw_data/GSE4707/'
+    ,GSEMatrix=T
+    ,getGPL=F
+    ,AnnotGPL=F
+    ,parseCharacteristics=F
+  )
+```
+
+```{r GSE4707 - Phenotype data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 02m 10s
+  # Downloaded on 2023-07-30
+  curl::curl_download(
+    paste0(
+      'https://www.ncbi.nlm.nih.gov/geo/download/'
+      ,'?acc=GSE4707&format=file'
+    )
+    ,paste0(
+      GSE4707$folder
+      ,'GSE4707_RAW.tar'
+    )
+  )
+  
+  paste0(
+      GSE4707$folder
+      ,'GSE4707_RAW.tar'
+    ) %>%
+    untar(
+      exdir=
+        paste0(
+          GSE4707$folder
+          ,'raw'
+        )
+    )
+  
+  paste0(
+      GSE4707$folder
+      ,'GSE4707_RAW.tar'
+    ) %>%
+    file.remove()
+  
+  paste0(
+      GSE4707$folder
+      ,'raw'
+    ) %>%
+    list.files(full.names=T) %>%
+    lapply(R.utils::gunzip)
+}
+
+GSE4707$pData=
+  GSE4707$eset %>%
+  pData() %>%
+  mutate(path=NA) %>%
+  select(path,everything())
+```
+
+```{r GSE4707 - Assay data, include=FALSE}
+GSE4707$raw=
+  GSE4707$eset
+
+if(all(c(1,2)%in%comp_req)){ # 02m 07s
+  GSE4707$unnorm=
+    GSE4707$eset %>%
+    backgroundCorrect.matrix() %>%
+    oligo::summarize(probes=rownames(.)) %>%
+    .[rownames(fData(GSE4707$eset)),] %>%
+    ExpressionSet(
+      assayData=.
+      ,phenoData=AnnotatedDataFrame(GSE4707$pData)
+      ,featureData=AnnotatedDataFrame(fData(GSE4707$eset))
+      ,protocolData=protocolData(GSE4707$eset)
+      ,experimentData=experimentData(GSE4707$eset)
+      ,annotation=annotation(GSE4707$eset)
+    )
+  
+  saveRDS(GSE4707$unnorm,'raw_data/GSE4707/GSE4707_unnorm.rds')
+  
+  GSE4707$norm=
+    GSE4707$eset %>%
+    backgroundCorrect.matrix() %>%
+    oligo::normalize() %>%
+    `dimnames<-`(dimnames(GSE4707$eset)) %>%
+    oligo::summarize(probes=rownames(.)) %>%
+    .[rownames(fData(GSE4707$eset)),] %>%
+    ExpressionSet(
+      assayData=.
+      ,phenoData=AnnotatedDataFrame(GSE4707$pData)
+      ,featureData=AnnotatedDataFrame(fData(GSE4707$eset))
+      ,protocolData=protocolData(GSE4707$eset)
+      ,experimentData=experimentData(GSE4707$eset)
+      ,annotation=annotation(GSE4707$eset)
+    )
+  
+  saveRDS(GSE4707$norm,'raw_data/GSE4707/GSE4707_norm.rds')
+}else{
+  GSE4707$unnorm=
+    readRDS('raw_data/GSE4707/GSE4707_unnorm.rds')
+  
+  GSE4707$norm=
+    readRDS('raw_data/GSE4707/GSE4707_norm.rds')
+}
+```
+
+```{r GSE4707 - Feature data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 11s
+  # Downloaded on 2023-07-30
+  curl::curl_download(
+    paste0(
+      'https://ftp.ncbi.nlm.nih.gov/geo/platforms/'
+      ,'GPL1nnn/GPL1708/annot/GPL1708.annot.gz'
+    )
+    ,paste0(
+      GSE4707$folder
+      ,'GPL1708.annot.gz'
+    )
+  )
+  
+  GSE4707$fData=
+    paste0(
+      GSE4707$folder
+      ,'GPL1708.annot.gz'
+    ) %>%
+    download_annotation_by_file(
+      skip_rows=28
+      ,mart=ensembl
+    )
+  
+  GSE4707$fData %>%
+    saveRDS('raw_data/GSE4707/GSE4707_fData.rds')
+}else{
+  GSE4707$fData=
+    readRDS('raw_data/GSE4707/GSE4707_fData.rds')
+}
+```
+
+```{r GSE4707 - Sample outliers by RLE (SOR), include=FALSE}
+GSE4707$RLE_data=
+  suspected_outliers(GSE4707$unnorm)
+```
+
+```{r GSE4707 - Plot SOR, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+GSE4707$RLE_data %>%
+  ggplot(aes(x=sample_id,y=RLE,fill=suspect_outlier)) +
+  geom_boxplot(outlier.shape=NA) +
+  theme_minimal() +
+  theme(axis.text.x=element_blank())
+```
+
+```{r GSE4707 - Sample outliers by HClust (SOH), include=FALSE}
+GSE4707$sample_hclust=
+  parallelDist(
+    t(exprs(GSE4707$unnorm))
+    ,method='manhattan'
+  ) %>%
+  hclust(method='complete')
+```
+
+```{r GSE4707 - Sample outliers (SO), include=FALSE}
+GSE4707$outliers=
+  cutree(GSE4707$sample_hclust,k=4) %>%
+  .[. %in% 3:4] %>%
+  names() %>%
+  intersect(
+    GSE4707$RLE_data %>%
+      filter(suspect_outlier=='yes') %>%
+      .$sample_id %>%
+      .[!duplicated(.)]
+  )
+
+GSE4707$sample_hclust$labels=
+  ifelse(
+    GSE4707$sample_hclust$labels %in% GSE4707$outliers
+    ,GSE4707$sample_hclust$labels
+    ,''
+  )
+```
+
+```{r GSE4707 - Plot SO, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+plot(GSE4707$sample_hclust,cex=0.6)
+rect.hclust(GSE4707$sample_hclust,k=4,border=2:5)
+```
+
+```{r GSE4707 - Low-expressed probes (LEP), include=FALSE}
+GSE4707$low_exp_probes=
+  rownames(GSE4707$norm) %>%
+  .[rowMedians(exprs(GSE4707$norm))
+    <=quantile(
+      rowMedians(exprs(GSE4707$norm))
+      ,GSE4707$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ]
+```
+
+```{r GSE4707 - LEP, eval=FALSE, fig.height=3.5, fig.width=3.5, include=FALSE}
+GSE4707$norm %>%
+  exprs() %>%
+  rowMedians() %>%
+  hist(100)
+
+abline(
+  v=quantile(
+      rowMedians(exprs(GSE4707$norm))
+      ,GSE4707$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ,col=2
+  ,lwd=3
+)
+```
+
+```{r GSE4707 - New expression set without LEP and SO, include=FALSE}
+GSE4707$filt_eset=
+  ExpressionSet(
+    assayData=
+      GSE4707$unnorm[rownames(GSE4707$fData),rownames(GSE4707$pData)] %>%
+      exprs()
+    ,phenoData=
+      AnnotatedDataFrame(GSE4707$pData)
+    ,featureData=
+      AnnotatedDataFrame(GSE4707$fData)
+    ,protocolData=
+      protocolData(GSE4707$eset)
+    ,experimentData=
+      experimentData(GSE4707$eset)
+    ,annotation=
+      annotation(GSE4707$eset)
+  ) %>%
+  .[!(rownames(.) %in% GSE4707$low_exp_probes)
+    ,!(colnames(.) %in% GSE4707$outliers)
+  ]
+```
+
+```{r GSE4707 - Summarize to HGNC symbol, include=FALSE}
+GSE4707$sum_to_hgnc=
+  collapseRows(
+    datET=
+      exprs(GSE4707$filt_eset)
+    ,rowID=
+      rownames(GSE4707$filt_eset)
+    ,rowGroup=
+      fData(GSE4707$filt_eset)['hgnc_symbol'] %>%
+      as.list() %>%
+      unlist()
+  )
+```
+
+```{r GSE4707 - HGNC expression set, include=FALSE}
+GSE4707$hgnc_eset=
+  ExpressionSet(
+    assayData=
+      GSE4707$sum_to_hgnc$datETcollapsed
+    ,phenoData=
+      AnnotatedDataFrame(pData(GSE4707$filt_eset))
+    ,featureData=
+      GSE4707$sum_to_hgnc$group2row %>%
+      as.data.frame() %>%
+      setNames(c('hgnc_symbol','probe_id')) %>%
+      left_join(
+        GSE4707$fData %>%
+          rownames_to_column(var='probe_id')
+        ,by=c('hgnc_symbol','probe_id')
+      ) %>%
+      column_to_rownames(var='hgnc_symbol') %>% 
+      AnnotatedDataFrame()
+    ,protocolData=
+      protocolData(GSE4707$filt_eset)
+    ,experimentData=
+      experimentData(GSE4707$filt_eset)
+    ,annotation=
+      annotation(GSE4707$filt_eset)
+  )
+```
+
+## GSE44711
+
+```{r GSE44711 - Visit experiment page and create list-folder, include=FALSE}
+# Visit https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE44711
+
+GSE44711=list()
+
+GSE44711$folder='raw_data/GSE44711/'
+
+if(!dir.exists(GSE44711$folder)){
+  GSE44711$folder %>%
+    dir.create(recursive=T)
+}
+```
+
+```{r GSE44711 - Expression set, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 01s
+  # Downloaded on 2023-07-30
+  curl::curl_download(
+    paste0(
+      'https://ftp.ncbi.nlm.nih.gov/geo/series/'
+      ,'GSE44nnn/GSE44711/matrix/GSE44711_series_matrix.txt.gz'
+    )
+    ,paste0(
+      GSE44711$folder
+      ,'GSE44711_series_matrix.txt.gz'
+    )
+  )
+}
+
+GSE44711$eset=
+  GEOquery::getGEO(
+    filename='raw_data/GSE44711/GSE44711_series_matrix.txt.gz'
+    ,destdir='raw_data/GSE44711/'
+    ,GSEMatrix=T
+    ,getGPL=F
+    ,AnnotGPL=F
+    ,parseCharacteristics=F
+  )
+```
+
+```{r GSE44711 - Phenotype data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 02m 10s
+  # Downloaded on 2023-07-30
+  curl::curl_download(
+    paste0(
+      'https://www.ncbi.nlm.nih.gov/geo/download/'
+      ,'?acc=GSE44711&format=file'
+    )
+    ,paste0(
+      GSE44711$folder
+      ,'GSE44711_RAW.tar'
+    )
+  )
+  
+  paste0(
+      GSE44711$folder
+      ,'GSE44711_RAW.tar'
+    ) %>%
+    untar(
+      exdir=
+        paste0(
+          GSE44711$folder
+          ,'raw'
+        )
+    )
+  
+  paste0(
+      GSE44711$folder
+      ,'GSE44711_RAW.tar'
+    ) %>%
+    file.remove()
+  
+  paste0(
+      GSE44711$folder
+      ,'raw'
+    ) %>%
+    list.files(full.names=T) %>%
+    lapply(R.utils::gunzip)
+}
+
+GSE44711$pData=
+  GSE44711$eset %>%
+  pData() %>%
+  mutate(path=NA) %>%
+  select(path,everything())
+```
+
+```{r GSE44711 - Assay data, include=FALSE}
+GSE44711$raw=
+  GSE44711$eset
+
+if(all(c(1,2)%in%comp_req)){ # 02m 07s
+  GSE44711$unnorm=
+    GSE44711$eset %>%
+    backgroundCorrect.matrix() %>%
+    oligo::summarize(probes=rownames(.)) %>%
+    .[rownames(fData(GSE44711$eset)),] %>%
+    ExpressionSet(
+      assayData=.
+      ,phenoData=AnnotatedDataFrame(GSE44711$pData)
+      ,featureData=AnnotatedDataFrame(fData(GSE44711$eset))
+      ,protocolData=protocolData(GSE44711$eset)
+      ,experimentData=experimentData(GSE44711$eset)
+      ,annotation=annotation(GSE44711$eset)
+    )
+  
+  saveRDS(GSE44711$unnorm,'raw_data/GSE44711/GSE44711_unnorm.rds')
+  
+  GSE44711$norm=
+    GSE44711$eset %>%
+    backgroundCorrect.matrix() %>%
+    oligo::normalize() %>%
+    `dimnames<-`(dimnames(GSE44711$eset)) %>%
+    oligo::summarize(probes=rownames(.)) %>%
+    .[rownames(fData(GSE44711$eset)),] %>%
+    ExpressionSet(
+      assayData=.
+      ,phenoData=AnnotatedDataFrame(GSE44711$pData)
+      ,featureData=AnnotatedDataFrame(fData(GSE44711$eset))
+      ,protocolData=protocolData(GSE44711$eset)
+      ,experimentData=experimentData(GSE44711$eset)
+      ,annotation=annotation(GSE44711$eset)
+    )
+  
+  saveRDS(GSE44711$norm,'raw_data/GSE44711/GSE44711_norm.rds')
+}else{
+  GSE44711$unnorm=
+    readRDS('raw_data/GSE44711/GSE44711_unnorm.rds')
+  
+  GSE44711$norm=
+    readRDS('raw_data/GSE44711/GSE44711_norm.rds')
+}
+```
+
+```{r GSE44711 - Feature data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 11s
+  # Downloaded on 2023-07-30
+  curl::curl_download(
+    paste0(
+      'https://ftp.ncbi.nlm.nih.gov/geo/platforms/'
+      ,'GPL10nnn/GPL10558/annot/GPL10558.annot.gz'
+    )
+    ,paste0(
+      GSE44711$folder
+      ,'GPL10558.annot.gz'
+    )
+  )
+  
+  GSE44711$fData=
+    paste0(
+      GSE44711$folder
+      ,'GPL10558.annot.gz'
+    ) %>%
+    download_annotation_by_file(
+      skip_rows=28
+      ,mart=ensembl
+    )
+  
+  GSE44711$fData %>%
+    saveRDS('raw_data/GSE44711/GSE44711_fData.rds')
+}else{
+  GSE44711$fData=
+    readRDS('raw_data/GSE44711/GSE44711_fData.rds')
+}
+```
+
+```{r GSE44711 - Sample outliers by RLE (SOR), include=FALSE}
+GSE44711$RLE_data=
+  suspected_outliers(GSE44711$unnorm)
+```
+
+```{r GSE44711 - Plot SOR, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+GSE44711$RLE_data %>%
+  ggplot(aes(x=sample_id,y=RLE,fill=suspect_outlier)) +
+  geom_boxplot(outlier.shape=NA) +
+  theme_minimal() +
+  theme(axis.text.x=element_blank())
+```
+
+```{r GSE44711 - Sample outliers by HClust (SOH), include=FALSE}
+GSE44711$sample_hclust=
+  parallelDist(
+    t(exprs(GSE44711$unnorm))
+    ,method='manhattan'
+  ) %>%
+  hclust(method='complete')
+```
+
+```{r GSE44711 - Sample outliers (SO), include=FALSE}
+GSE44711$outliers=
+  cutree(GSE44711$sample_hclust,k=4) %>%
+  .[. %in% 2:4] %>%
+  names() %>%
+  intersect(
+    GSE44711$RLE_data %>%
+      filter(suspect_outlier=='yes') %>%
+      .$sample_id %>%
+      .[!duplicated(.)]
+  )
+
+GSE44711$sample_hclust$labels=
+  ifelse(
+    GSE44711$sample_hclust$labels %in% GSE44711$outliers
+    ,GSE44711$sample_hclust$labels
+    ,''
+  )
+```
+
+```{r GSE44711 - Plot SO, eval=FALSE, fig.height=5, fig.width=5, include=FALSE}
+plot(GSE44711$sample_hclust,cex=0.6)
+rect.hclust(GSE44711$sample_hclust,k=4,border=2:5)
+```
+
+```{r GSE44711 - Low-expressed probes (LEP), include=FALSE}
+GSE44711$low_exp_probes=
+  rownames(GSE44711$norm) %>%
+  .[rowMedians(exprs(GSE44711$norm))
+    <=quantile(
+      rowMedians(exprs(GSE44711$norm))
+      ,GSE44711$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ]
+```
+
+```{r GSE44711 - LEP, eval=FALSE, fig.height=3.5, fig.width=3.5, include=FALSE}
+GSE44711$norm %>%
+  exprs() %>%
+  rowMedians() %>%
+  hist(100)
+
+abline(
+  v=quantile(
+      rowMedians(exprs(GSE44711$norm))
+      ,GSE44711$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ,col=2
+  ,lwd=3
+)
+```
+
+```{r GSE44711 - New expression set without LEP and SO, include=FALSE}
+GSE44711$filt_eset=
+  ExpressionSet(
+    assayData=
+      GSE44711$unnorm[
+        GSE44711$fData %>%
+          .[intersect(rownames(.),rownames(GSE44711$unnorm)),] %>%
+          rownames()
+        ,rownames(GSE44711$pData)
+      ] %>%
+      exprs()
+    ,phenoData=
+      AnnotatedDataFrame(GSE44711$pData)
+    ,featureData=
+      GSE44711$fData %>%
+      .[intersect(rownames(.),rownames(GSE44711$unnorm)),] %>%
+      AnnotatedDataFrame()
+    ,protocolData=
+      protocolData(GSE44711$eset)
+    ,experimentData=
+      experimentData(GSE44711$eset)
+    ,annotation=
+      annotation(GSE44711$eset)
+  ) %>%
+  .[!(rownames(.) %in% GSE44711$low_exp_probes)
+    ,!(colnames(.) %in% GSE44711$outliers)
+  ]
+```
+
+```{r GSE44711 - Summarize to HGNC symbol, include=FALSE}
+GSE44711$sum_to_hgnc=
+  collapseRows(
+    datET=
+      exprs(GSE44711$filt_eset)
+    ,rowID=
+      rownames(GSE44711$filt_eset)
+    ,rowGroup=
+      fData(GSE44711$filt_eset)['hgnc_symbol'] %>%
+      as.list() %>%
+      unlist()
+  )
+```
+
+```{r GSE44711 - HGNC expression set, include=FALSE}
+GSE44711$hgnc_eset=
+  ExpressionSet(
+    assayData=
+      GSE44711$sum_to_hgnc$datETcollapsed
+    ,phenoData=
+      AnnotatedDataFrame(pData(GSE44711$filt_eset))
+    ,featureData=
+      GSE44711$sum_to_hgnc$group2row %>%
+      as.data.frame() %>%
+      setNames(c('hgnc_symbol','probe_id')) %>%
+      left_join(
+        GSE44711$fData %>%
+          rownames_to_column(var='probe_id')
+        ,by=c('hgnc_symbol','probe_id')
+      ) %>%
+      column_to_rownames(var='hgnc_symbol') %>% 
+      AnnotatedDataFrame()
+    ,protocolData=
+      protocolData(GSE44711$filt_eset)
+    ,experimentData=
+      experimentData(GSE44711$filt_eset)
+    ,annotation=
+      annotation(GSE44711$filt_eset)
+  )
+```
+
+## GSE128381
+
+```{r GSE128381 - Visit experiment page and create list-folder, include=FALSE}
+# Visit https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE128381
+
+GSE128381=list()
+
+GSE128381$folder='raw_data/GSE128381/'
+
+if(!dir.exists(GSE128381$folder)){
+  GSE128381$folder %>%
+    dir.create(recursive=T)
+}
+```
+
+```{r GSE128381 - Expression set, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 01s
+  # Downloaded on 2023-07-30
+  curl::curl_download(
+    paste0(
+      'https://ftp.ncbi.nlm.nih.gov/geo/series/'
+      ,'GSE128nnn/GSE128381/matrix/GSE128381_series_matrix.txt.gz'
+    )
+    ,paste0(
+      GSE128381$folder
+      ,'GSE128381_series_matrix.txt.gz'
+    )
+  )
+}
+
+GSE128381$eset=
+  GEOquery::getGEO(
+    filename='raw_data/GSE128381/GSE128381_series_matrix.txt.gz'
+    ,destdir='raw_data/GSE128381/'
+    ,GSEMatrix=T
+    ,getGPL=F
+    ,AnnotGPL=F
+    ,parseCharacteristics=F
+  )
+```
+
+```{r GSE128381 - Phenotype data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 02m 10s
+  # Downloaded on 2023-07-30
+  curl::curl_download(
+    paste0(
+      'https://www.ncbi.nlm.nih.gov/geo/download/'
+      ,'?acc=GSE128381&format=file'
+    )
+    ,paste0(
+      GSE128381$folder
+      ,'GSE128381_RAW.tar'
+    )
+  )
+  
+  paste0(
+      GSE128381$folder
+      ,'GSE128381_RAW.tar'
+    ) %>%
+    untar(
+      exdir=
+        paste0(
+          GSE128381$folder
+          ,'raw'
+        )
+    )
+  
+  paste0(
+      GSE128381$folder
+      ,'GSE128381_RAW.tar'
+    ) %>%
+    file.remove()
+  
+  paste0(
+      GSE128381$folder
+      ,'raw'
+    ) %>%
+    list.files(full.names=T) %>%
+    lapply(R.utils::gunzip)
+}
+
+GSE128381$pData=
+  GSE128381$eset %>%
+  pData() %>%
+  mutate(path=NA) %>%
+  select(path,everything())
+```
+
+```{r GSE128381 - Assay data, include=FALSE}
+GSE128381$raw=
+  GSE128381$eset
+
+if(all(c(1,2)%in%comp_req)){ # 02m 07s
+  GSE128381$unnorm=
+    GSE128381$eset %>%
+    backgroundCorrect.matrix() %>%
+    oligo::summarize(probes=rownames(.)) %>%
+    .[rownames(fData(GSE128381$eset)),] %>%
+    ExpressionSet(
+      assayData=.
+      ,phenoData=AnnotatedDataFrame(GSE128381$pData)
+      ,featureData=AnnotatedDataFrame(fData(GSE128381$eset))
+      ,protocolData=protocolData(GSE128381$eset)
+      ,experimentData=experimentData(GSE128381$eset)
+      ,annotation=annotation(GSE128381$eset)
+    )
+  
+  saveRDS(GSE128381$unnorm,'raw_data/GSE128381/GSE128381_unnorm.rds')
+  
+  GSE128381$norm=
+    GSE128381$eset %>%
+    backgroundCorrect.matrix() %>%
+    oligo::normalize() %>%
+    `dimnames<-`(dimnames(GSE128381$eset)) %>%
+    oligo::summarize(probes=rownames(.)) %>%
+    .[rownames(fData(GSE128381$eset)),] %>%
+    ExpressionSet(
+      assayData=.
+      ,phenoData=AnnotatedDataFrame(GSE128381$pData)
+      ,featureData=AnnotatedDataFrame(fData(GSE128381$eset))
+      ,protocolData=protocolData(GSE128381$eset)
+      ,experimentData=experimentData(GSE128381$eset)
+      ,annotation=annotation(GSE128381$eset)
+    )
+  
+  saveRDS(GSE128381$norm,'raw_data/GSE128381/GSE128381_norm.rds')
+}else{
+  GSE128381$unnorm=
+    readRDS('raw_data/GSE128381/GSE128381_unnorm.rds')
+  
+  GSE128381$norm=
+    readRDS('raw_data/GSE128381/GSE128381_norm.rds')
+}
+```
+
+```{r GSE128381 - Feature data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 03m 21s
+  # Downloaded on 2023-07-30
+  GSE128381$fData=
+    download_annotation(
+      platform='agilent_sureprint_g3_ge_8x60k_v2'
+      ,mart=ensembl
+    ) %>%
+    .[intersect(rownames(GSE128381$norm),rownames(.)),]
+  
+  GSE128381$fData %>%
+    saveRDS('raw_data/GSE128381/GSE128381_fData.rds')
+}else{
+  GSE128381$fData=
+    readRDS('raw_data/GSE128381/GSE128381_fData.rds')
+}
+```
+
+```{r GSE128381 - Sample outliers by RLE (SOR), include=FALSE}
+GSE128381$RLE_data=
+  suspected_outliers(GSE128381$unnorm)
+```
+
+```{r GSE128381 - Plot SOR, eval=FALSE, fig.height=9, fig.width=9, include=FALSE}
+GSE128381$RLE_data %>%
+  ggplot(aes(x=sample_id,y=RLE,fill=suspect_outlier)) +
+  geom_boxplot(outlier.shape=NA) +
+  theme_minimal() +
+  theme(axis.text.x=element_blank())
+```
+
+```{r GSE128381 - Sample outliers by HClust (SOH), include=FALSE}
+GSE128381$sample_hclust=
+  parallelDist(
+    t(exprs(GSE128381$unnorm))
+    ,method='manhattan'
+  ) %>%
+  hclust(method='complete')
+```
+
+```{r GSE128381 - Sample outliers (SO), include=FALSE}
+GSE128381$outliers=
+  cutree(GSE128381$sample_hclust,k=2) %>%
+  .[. %in% 2] %>%
+  names() %>%
+  intersect(
+    GSE128381$RLE_data %>%
+      filter(suspect_outlier=='yes') %>%
+      .$sample_id %>%
+      .[!duplicated(.)]
+  )
+
+GSE128381$sample_hclust$labels=
+  ifelse(
+    GSE128381$sample_hclust$labels %in% GSE128381$outliers
+    ,GSE128381$sample_hclust$labels
+    ,''
+  )
+```
+
+```{r GSE128381 - Plot SO, eval=FALSE, fig.height=9, fig.width=9, include=FALSE}
+plot(GSE128381$sample_hclust,cex=0.6)
+rect.hclust(GSE128381$sample_hclust,k=2,border=2:3)
+```
+
+```{r GSE128381 - Low-expressed probes (LEP), include=FALSE}
+GSE128381$low_exp_probes=
+  rownames(GSE128381$norm) %>%
+  .[rowMedians(exprs(GSE128381$norm))
+    <=quantile(
+      rowMedians(exprs(GSE128381$norm))
+      ,GSE128381$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ]
+```
+
+```{r GSE128381 - LEP, eval=FALSE, fig.height=3.5, fig.width=3.5, include=FALSE}
+GSE128381$norm %>%
+  exprs() %>%
+  rowMedians() %>%
+  hist(100)
+
+abline(
+  v=quantile(
+      rowMedians(exprs(GSE128381$norm))
+      ,GSE128381$norm %>%
+        exprs() %>%
+        rowMedians() %>%
+        cut(breaks=100) %>%
+        table() %>%
+        which.max() %>%
+        sapply(\(x)round(x*0.75)/100)
+    )
+  ,col=2
+  ,lwd=3
+)
+```
+
+```{r GSE128381 - New expression set without LEP and SO, include=FALSE}
+GSE128381$filt_eset=
+  ExpressionSet(
+    assayData=
+      GSE128381$unnorm[rownames(GSE128381$fData),rownames(GSE128381$pData)] %>%
+      exprs()
+    ,phenoData=
+      AnnotatedDataFrame(GSE128381$pData)
+    ,featureData=
+      AnnotatedDataFrame(GSE128381$fData)
+    ,protocolData=
+      protocolData(GSE128381$eset)
+    ,experimentData=
+      experimentData(GSE128381$eset)
+    ,annotation=
+      annotation(GSE128381$eset)
+  ) %>%
+  .[!(rownames(.) %in% GSE128381$low_exp_probes)
+    ,!(colnames(.) %in% GSE128381$outliers)
+  ]
+```
+
+```{r GSE128381 - Summarize to HGNC symbol, include=FALSE}
+GSE128381$sum_to_hgnc=
+  collapseRows(
+    datET=
+      exprs(GSE128381$filt_eset)
+    ,rowID=
+      rownames(GSE128381$filt_eset)
+    ,rowGroup=
+      fData(GSE128381$filt_eset)['hgnc_symbol'] %>%
+      as.list() %>%
+      unlist()
+  )
+```
+
+```{r GSE128381 - HGNC expression set, include=FALSE}
+GSE128381$hgnc_eset=
+  ExpressionSet(
+    assayData=
+      GSE128381$sum_to_hgnc$datETcollapsed
+    ,phenoData=
+      AnnotatedDataFrame(pData(GSE128381$filt_eset))
+    ,featureData=
+      GSE128381$sum_to_hgnc$group2row %>%
+      as.data.frame() %>%
+      setNames(c('hgnc_symbol','probe_id')) %>%
+      left_join(
+        GSE128381$fData %>%
+          rownames_to_column(var='probe_id')
+        ,by=c('hgnc_symbol','probe_id')
+      ) %>%
+      column_to_rownames(var='hgnc_symbol') %>% 
+      AnnotatedDataFrame()
+    ,protocolData=
+      protocolData(GSE128381$filt_eset)
+    ,experimentData=
+      experimentData(GSE128381$filt_eset)
+    ,annotation=
+      annotation(GSE128381$filt_eset)
+  )
+```
+
+```{r Save processed expression sets, eval=FALSE, include=FALSE}
+saveRDS(GSE75010$hgnc_eset,'data/GSE75010.rds')
+saveRDS(GSE98224$hgnc_eset,'data/GSE98224.rds')
+saveRDS(GSE100415$hgnc_eset,'data/GSE100415.rds')
+saveRDS(GSE4888$hgnc_eset,'data/GSE4888.rds')
+saveRDS(GSE6364$hgnc_eset,'data/GSE6364.rds')
+saveRDS(EMTAB680$hgnc_eset,'data/EMTAB680.rds')
+saveRDS(GSE12767$hgnc_eset,'data/GSE12767.rds')
+saveRDS(GSE9984$hgnc_eset,'data/GSE9984.rds')
+saveRDS(GSE30186$hgnc_eset,'data/GSE30186.rds')
+saveRDS(GSE10588$hgnc_eset,'data/GSE10588.rds')
+saveRDS(GSE24129$hgnc_eset,'data/GSE24129.rds')
+saveRDS(GSE25906$hgnc_eset,'data/GSE25906.rds')
+saveRDS(GSE4707$hgnc_eset,'data/GSE4707.rds')
+saveRDS(GSE44711$hgnc_eset,'data/GSE44711.rds')
+saveRDS(GSE128381$hgnc_eset,'data/GSE128381.rds')
+```
+
+# Grouping
+
+```{r Load processed esets for assoc. factors as discovery sets, include=FALSE}
+GSE4888=readRDS('data/GSE4888.rds')
+GSE6364=readRDS('data/GSE6364.rds')
+EMTAB680=readRDS('data/EMTAB680.rds')
+GSE12767=readRDS('data/GSE12767.rds')
+GSE9984=readRDS('data/GSE9984.rds')
+```
+
+```{r Load processed esets for outcomes as discovery sets, include=FALSE}
+GSE75010=readRDS('data/GSE75010.rds')
+GSE98224=readRDS('data/GSE98224.rds')
+GSE100415=readRDS('data/GSE100415.rds')
+```
+
+```{r Load processed esets for outcomes as validation sets, include=FALSE}
+GSE30186=readRDS('data/GSE30186.rds')
+GSE10588=readRDS('data/GSE10588.rds')
+GSE24129=readRDS('data/GSE24129.rds')
+GSE25906=readRDS('data/GSE25906.rds')
+GSE4707=readRDS('data/GSE4707.rds')
+GSE44711=readRDS('data/GSE44711.rds')
+GSE128381=readRDS('data/GSE128381.rds')
+```
+
+```{r Select columns of interest, include=FALSE}
+phenotype=
+  list(
+    GSE4888=GSE4888
+    ,GSE6364=GSE6364
+    ,EMTAB680=EMTAB680
+    ,GSE12767=GSE12767
+    ,GSE9984=GSE9984
+    ,GSE75010=GSE75010
+    ,GSE98224=GSE98224
+    ,GSE100415=GSE100415
+    ,GSE30186=GSE30186
+    ,GSE10588=GSE10588
+    ,GSE24129=GSE24129
+    ,GSE25906=GSE25906
+    ,GSE4707=GSE4707
+    ,GSE44711=GSE44711
+    ,GSE128381=GSE128381
+  ) %>%
+  lapply(pData) %>%
+  lapply(\(x)x %>%.[,-1]) %>%
+  preprocess_coi()
+```
+
+```{r Define standard column names, include=FALSE}
+std_colnames=c(
+  # Discovery set origin
+  'title'
+  ,'apgar1'
+  ,'apgar5'
+  ,'att_vag_del'
+  ,'chor'
+  ,'pe'
+  ,'ga2'
+  ,'ga'
+  ,'hellp'
+  ,'f_sex'
+  ,'iugr'
+  ,'age'
+  ,'blood_type'
+  ,'bmi'
+  ,'ethnicity'
+  ,'max_dbp'
+  ,'max_sbp'
+  ,'mean_ua_pi'
+  ,'mean_uta_pi'
+  ,'delivery'
+  ,'mode_proteinuria'
+  ,'newborn_weight_z'
+  ,'nicu'
+  ,'plac_weight_wz'
+  ,'prev_ht'
+  ,'prev_miscarr'
+  ,'prev_null'
+  ,'tissue'
+  ,'u_cord_d'
+  ,'height'
+  ,'pp_weight'
+  ,'l_uta_pi'
+  ,'r_uta_pi'
+  ,'plac_thick'
+  ,'gravidity'
+  ,'parity'
+  ,'ga_delivery'
+  ,'sbp_int'
+  ,'dbp_int'
+  ,'sbp_pp_int'
+  ,'dbp_pp_int'
+  ,'protein_urine'
+  ,'uric_acid'
+  ,'newborn_weight'
+  ,'creatinine'
+  ,'platelet'
+  ,'end_phase'
+  ,'others'
+  ,'dec_level'
+  ,'pregnancy'
+  
+  # Addition from validation set origin
+  ,'plac_weight'
+  ,'induction'
+  ,'batch'
+)
+```
+
+```{r Create table for converting phenotype colnames, include=FALSE}
+conv_pcol=
+  phenotype %>%
+  create_conv_pcol(std_colnames)
+
+conv_pcol %>%
+  as.data.frame() %>%
+  rownames_to_column('std_colname') %>%
+  write_csv('data/columns_convertion.csv',na='')
+```
+
+```{r Bind all phenotypes of interest, include=FALSE}
+coi=
+  c(1,6,17,16,25,40,41,11,22,44,9,8,7,37,5,20,4,47:50,28,46)
+
+poi0=
+  phenotype %>%
+  bind_poi(conv_pcol,coi)
+```
+
+```{r Check_duplicates, include=FALSE}
+poi=
+  rbind(
+    poi0 %>%
+      filter(!(gsm %in% poi0$gsm[duplicated(poi0$gsm)]))
+    ,poi0 %>%
+      filter(
+        gsm %in% poi0$gsm[duplicated(poi0$gsm)]
+        & gse=='GSE98224'
+      )
+  ) %>%
+  arrange(
+    factor(
+      gse
+      ,c('GSE4888','GSE6364','EMTAB680','GSE12767','GSE9984'
+         ,'GSE75010','GSE98224','GSE100415'
+         ,'GSE30186','GSE10588','GSE24129','GSE25906','GSE4707','GSE44711'
+         ,'GSE128381'
+       )
+    )
+    ,gsm
+  )
+```
+
+```{r Create a table of estimated fetal weight by WHO, include=FALSE}
+who_efw=create_who_efw()
+```
+
+```{r Create empty grouping list variable, include=FALSE}
+grouping0=list()
+```
+
+## Discovery set, associated factor
+
+```{r Endometrium, include=FALSE}
+grouping0$E_PRE=
+  poi %>%
+  filter(set=='Discovery set, Associated factor, Endometrium') %>%
+  filter(
+    str_detect(str_to_lower(end_phase),'proliferative')
+    & !str_detect(str_to_lower(others),'endometriosis')
+    & !str_detect(str_to_lower(others),'adenomyosis')
+  )
+  
+grouping0$E_ESE=
+  poi %>%
+  filter(set=='Discovery set, Associated factor, Endometrium') %>%
+  filter(
+    str_detect(str_to_lower(end_phase),'early')
+    & str_detect(str_to_lower(end_phase),'secretory')
+    & !str_detect(str_to_lower(others),'endometriosis')
+    & !str_detect(str_to_lower(others),'adenomyosis')
+  )
+  
+grouping0$E_MSE=
+  poi %>%
+  filter(set=='Discovery set, Associated factor, Endometrium') %>%
+  filter(
+    str_detect(str_to_lower(end_phase),'mid')
+    & str_detect(str_to_lower(end_phase),'secretory')
+    & !str_detect(str_to_lower(others),'endometriosis')
+    & !str_detect(str_to_lower(others),'adenomyosis')
+  )
+  
+grouping0$E_LSE=
+  poi %>%
+  filter(set=='Discovery set, Associated factor, Endometrium') %>%
+  filter(
+    str_detect(str_to_lower(end_phase),'late')
+    & str_detect(str_to_lower(end_phase),'secretory')
+    & !str_detect(str_to_lower(others),'endometriosis')
+    & !str_detect(str_to_lower(others),'adenomyosis')
+  )
+```
+
+```{r Decidua, include=FALSE}
+grouping0$D_EPND=
+  poi %>%
+  filter(set=='Discovery set, Associated factor, Decidua') %>%
+  filter(
+    dec_level=='Non-decidualised'
+    & pregnancy=='EP'
+  )
+  
+grouping0$D_EPID=
+  poi %>%
+  filter(set=='Discovery set, Associated factor, Decidua') %>%
+  filter(
+    dec_level=='Partially decidualised'
+    & pregnancy=='EP'
+  )
+  
+grouping0$D_IPID=
+  poi %>%
+  filter(set=='Discovery set, Associated factor, Decidua') %>%
+  filter(
+    dec_level=='Partially decidualised'
+    & pregnancy=='IUP'
+  )
+  
+grouping0$D_IPCD=
+  poi %>%
+  filter(set=='Discovery set, Associated factor, Decidua') %>%
+  filter(
+    dec_level=='Decidualised'
+    & pregnancy=='IUP'
+  )
+```
+
+```{r Placenta, include=FALSE}
+grouping0$P_T1=
+  poi %>%
+  filter(set=='Discovery set, Associated factor, Placenta') %>%
+  filter(
+    (str_detect(str_to_lower(tissue),'first trimester')
+     & str_detect(str_to_lower(title),'control') 
+    )
+    | str_detect(str_to_lower(title),'first trimester')
+  )
+
+grouping0$P_T2=
+  poi %>%
+  filter(set=='Discovery set, Associated factor, Placenta') %>%
+  filter(
+    str_detect(str_to_lower(title),'second trimester')
+  )
+
+grouping0$P_TE=
+  poi %>%
+  filter(set=='Discovery set, Associated factor, Placenta') %>%
+  filter(
+    str_detect(str_to_lower(title),'term')
+  )
+```
+
+```{r Chorioamnionitis, include=FALSE}
+grouping0$C2_NC2=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)<27) %>%
+  filter(chor=='No')
+
+grouping0$C2_CHOR2=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)<27) %>%
+  filter(chor=='Yes')
+
+grouping0$C3_NC3=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(chor=='No')
+
+grouping0$C3_CHOR3=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(chor=='Yes')
+```
+
+```{r HELLP, include=FALSE}
+grouping0$H2_NH2=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)<27) %>%
+  filter(hellp=='No')
+
+grouping0$H2_HELLP2=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)<27) %>%
+  filter(hellp=='Yes')
+
+grouping0$H3_NH3=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(hellp=='No')
+
+grouping0$H3_HELLP3=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(hellp=='Yes')
+```
+
+## Discovery set, Outcome
+
+```{r Control, include=FALSE}
+grouping0$OD_C=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    !str_detect(title,'PE')
+    & !(str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+       & !str_detect(title,'CH')
+    )
+    & !(as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140)
+    & (as.numeric(ga)+as.numeric(ga2)/7)>37
+    & (hellp=='No' | is.na(hellp) | hellp=='NA')
+  )
+```
+
+```{r Preeclampsia, include=FALSE}
+grouping0$OD_EOMPE=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    str_detect(title,'PE')
+    & !(str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+       & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140)
+    & !(as.numeric(max_dbp)>=110
+        | as.numeric(max_sbp)>=160
+        | !(hellp=='No' | is.na(hellp) | hellp=='NA')
+    )
+    & (as.numeric(ga)+as.numeric(ga2)/7)<34
+  )
+
+grouping0$OD_LOMPE=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    str_detect(title,'PE')
+    & !(str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+       & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140)
+    & !(as.numeric(max_dbp)>=110
+        | as.numeric(max_sbp)>=160
+        | !(hellp=='No' | is.na(hellp) | hellp=='NA')
+    )
+    & (as.numeric(ga)+as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OD_EOSPE=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    str_detect(title,'PE')
+    & !(str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+       & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=110
+       | as.numeric(max_sbp)>=160
+       | !(hellp=='No' | is.na(hellp) | hellp=='NA')
+    )
+    & (as.numeric(ga)+as.numeric(ga2)/7)<34
+  )
+
+grouping0$OD_LOSPE=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    str_detect(title,'PE')
+    & !(str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+       & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=110
+       | as.numeric(max_sbp)>=160
+       | !(hellp=='No' | is.na(hellp) | hellp=='NA')
+    )
+    & (as.numeric(ga)+as.numeric(ga2)/7)>=34
+  )
+```
+
+```{r Preeclampsia with FGR, include=FALSE}
+grouping0$OD_EOMPE_FGR=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    str_detect(title,'PE')
+    & (str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+       & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140)
+    & !(as.numeric(max_dbp)>=110
+        | as.numeric(max_sbp)>=160
+        | !(hellp=='No' | is.na(hellp) | hellp=='NA')
+    )
+    & (as.numeric(ga)+as.numeric(ga2)/7)<34
+  )
+
+grouping0$OD_LOMPE_FGR=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    str_detect(title,'PE')
+    & (str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+       & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140)
+    & !(as.numeric(max_dbp)>=110
+        | as.numeric(max_sbp)>=160
+        | !(hellp=='No' | is.na(hellp) | hellp=='NA')
+    )
+    & (as.numeric(ga)+as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OD_EOSPE_FGR=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    str_detect(title,'PE')
+    & (str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH'))
+    & (as.numeric(max_dbp)>=110
+       | as.numeric(max_sbp)>=160
+       | !(hellp=='No' | is.na(hellp) | hellp=='NA')
+    )
+    & (as.numeric(ga)+as.numeric(ga2)/7)<34
+  )
+
+grouping0$OD_LOSPE_FGR=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    str_detect(title,'PE')
+    & (str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+       & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=110
+       | as.numeric(max_sbp)>=160
+       | !(hellp=='No' | is.na(hellp) | hellp=='NA')
+    )
+    & (as.numeric(ga)+as.numeric(ga2)/7)>=34
+  )
+```
+
+```{r Superimposed preeclampsia, include=FALSE}
+grouping0$OD_SIM_EOMPE=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    str_detect(title,'PE')
+    & !(str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+        & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140)
+    & !(as.numeric(max_dbp)>=110
+        | as.numeric(max_sbp)>=160
+        | !(hellp=='No' | is.na(hellp) | hellp=='NA')
+    )
+    & (as.numeric(ga)+as.numeric(ga2)/7)<34
+  )
+
+grouping0$OD_SIM_LOMPE=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    str_detect(title,'PE')
+    & !(str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+        & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140)
+    & !(as.numeric(max_dbp)>=110
+        | as.numeric(max_sbp)>=160
+        | !(hellp=='No' | is.na(hellp) | hellp=='NA')
+    )
+    & (as.numeric(ga)+as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OD_SIM_EOSPE=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    str_detect(title,'PE')
+    & !(str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+        & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=110
+       | as.numeric(max_sbp)>=160
+       | !(hellp=='No' | is.na(hellp) | hellp=='NA')
+    )
+    & (as.numeric(ga)+as.numeric(ga2)/7)<34
+  )
+
+grouping0$OD_SIM_LOSPE=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    str_detect(title,'PE')
+    & !(str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+        & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=110
+       | as.numeric(max_sbp)>=160
+       | !(hellp=='No' | is.na(hellp) | hellp=='NA')
+    )
+    & (as.numeric(ga)+as.numeric(ga2)/7)>=34
+  )
+```
+
+```{r Superimposed preeclampsia with FGR, include=FALSE}
+grouping0$OD_SIM_EOMPE_FGR=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    str_detect(title,'PE')
+    & (str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+        & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140)
+    & !(as.numeric(max_dbp)>=110
+        | as.numeric(max_sbp)>=160
+        | !(hellp=='No' | is.na(hellp) | hellp=='NA')
+    )
+    & (as.numeric(ga)+as.numeric(ga2)/7)<34
+  )
+
+grouping0$OD_SIM_LOMPE_FGR=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    str_detect(title,'PE')
+    & (str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+        & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140)
+    & !(as.numeric(max_dbp)>=110
+        | as.numeric(max_sbp)>=160
+        | !(hellp=='No' | is.na(hellp) | hellp=='NA')
+    )
+    & (as.numeric(ga)+as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OD_SIM_EOSPE_FGR=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    str_detect(title,'PE')
+    & (str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+        & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=110
+       | as.numeric(max_sbp)>=160
+       | !(hellp=='No' | is.na(hellp) | hellp=='NA')
+    )
+    & (as.numeric(ga)+as.numeric(ga2)/7)<34
+  )
+
+grouping0$OD_SIM_LOSPE_FGR=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    str_detect(title,'PE')
+    & (str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+        & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=110
+       | as.numeric(max_sbp)>=160
+       | !(hellp=='No' | is.na(hellp) | hellp=='NA')
+    )
+    & (as.numeric(ga)+as.numeric(ga2)/7)>=34
+  )
+```
+
+```{r Gestational hypertension, include=FALSE}
+grouping0$OD_EGH=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    !str_detect(title,'PE')
+    & !(str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+       & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140)
+    & (as.numeric(ga)+as.numeric(ga2)/7)<34
+  )
+
+grouping0$OD_LGH=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    !str_detect(title,'PE')
+    & !(str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+       & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140)
+    & (as.numeric(ga)+as.numeric(ga2)/7)>=34
+  )
+```
+
+```{r Gestational hypertension with FGR, include=FALSE}
+grouping0$OD_EGH_FGR=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    !str_detect(title,'PE')
+    & (str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+       & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140)
+    & (as.numeric(ga)+as.numeric(ga2)/7)<34
+  )
+
+grouping0$OD_LGH_FGR=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    !str_detect(title,'PE')
+    & (str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+       & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140)
+    & (as.numeric(ga)+as.numeric(ga2)/7)>=34
+  )
+```
+
+```{r Chronic hypertension, include=FALSE}
+grouping0$OD_ECH=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    !str_detect(title,'PE')
+    & !(str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+        & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140)
+    & (as.numeric(ga)+as.numeric(ga2)/7)<34
+  )
+
+grouping0$OD_LCH=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    !str_detect(title,'PE')
+    & !(str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+        & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140)
+    & (as.numeric(ga)+as.numeric(ga2)/7)>=34
+  )
+```
+
+```{r Chronic hypertension with FGR, include=FALSE}
+grouping0$OD_ECH_FGR=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    !str_detect(title,'PE')
+    & (str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+        & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140)
+    & (as.numeric(ga)+as.numeric(ga2)/7)<34
+  )
+
+grouping0$OD_LCH_FGR=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    !str_detect(title,'PE')
+    & (str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+        & !str_detect(title,'CH')
+    )
+    & (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140)
+    & (as.numeric(ga)+as.numeric(ga2)/7)>=34
+  )
+```
+
+```{r FGR, include=FALSE}
+grouping0$OD_EFGR=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    !str_detect(title,'PE')
+    & (str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA')
+       & !str_detect(title,'CH')
+    )
+    & !(as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140)
+    & (as.numeric(ga)+as.numeric(ga2)/7)<34
+  )
+
+grouping0$OD_LFGR=
+  poi %>%
+  filter(set=='Discovery set, Outcome, Placenta') %>%
+  filter((as.numeric(ga)+as.numeric(ga2)/7)>=27) %>%
+  filter(
+    !str_detect(title,'PE')
+    & (str_detect(title,'SGA') | str_detect(title,'FGR') | iugr=='Yes')
+    & ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH'))
+    & !(as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140)
+    & (as.numeric(ga)+as.numeric(ga2)/7)>=34
+  )
+```
+
+## Validation set, Outcome
+
+```{r GSE30186}
+grouping0$OV_C$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    !str_detect(title,'preeclampsia') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    !(as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    (as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OV_EOMPE$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    !(as.numeric(max_dbp)>=110 | as.numeric(max_sbp)>=160 | !(hellp=='No' | is.na(hellp) | hellp=='NA')) &
+    (as.numeric(ga2)/7)<34
+  )
+
+grouping0$OV_LOMPE$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    !(as.numeric(max_dbp)>=110 | as.numeric(max_sbp)>=160 | !(hellp=='No' | is.na(hellp) | hellp=='NA')) &
+    (as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OV_EOSPE$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=110 | as.numeric(max_sbp)>=160 | !(hellp=='No' | is.na(hellp) | hellp=='NA')) &
+    (as.numeric(ga2)/7)<34
+  )
+
+grouping0$OV_LOSPE$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=110 | as.numeric(max_sbp)>=160 | !(hellp=='No' | is.na(hellp) | hellp=='NA')) &
+    (as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OV_EOMPE_FGR$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    (as.numeric(newborn_weight)<ref10th) &
+    ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    !(as.numeric(max_dbp)>=110 | as.numeric(max_sbp)>=160 | !(hellp=='No' | is.na(hellp) | hellp=='NA')) &
+    (as.numeric(ga2)/7)<34
+  )
+
+grouping0$OV_LOMPE_FGR$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    (as.numeric(newborn_weight)<ref10th) &
+    ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    !(as.numeric(max_dbp)>=110 | as.numeric(max_sbp)>=160 | !(hellp=='No' | is.na(hellp) | hellp=='NA')) &
+    (as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OV_EOSPE_FGR$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    (as.numeric(newborn_weight)<ref10th) &
+    ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=110 | as.numeric(max_sbp)>=160 | !(hellp=='No' | is.na(hellp) | hellp=='NA')) &
+    (as.numeric(ga2)/7)<34
+  )
+
+grouping0$OV_LOSPE_FGR$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    (as.numeric(newborn_weight)<ref10th) &
+    ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=110 | as.numeric(max_sbp)>=160 | !(hellp=='No' | is.na(hellp) | hellp=='NA')) &
+    (as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OV_SIM_EOMPE$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    !(as.numeric(max_dbp)>=110 | as.numeric(max_sbp)>=160 | !(hellp=='No' | is.na(hellp) | hellp=='NA')) &
+    (as.numeric(ga2)/7)<34
+  )
+
+grouping0$OV_SIM_LOMPE$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    !(as.numeric(max_dbp)>=110 | as.numeric(max_sbp)>=160 | !(hellp=='No' | is.na(hellp) | hellp=='NA')) &
+    (as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OV_SIM_EOSPE$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=110 | as.numeric(max_sbp)>=160 | !(hellp=='No' | is.na(hellp) | hellp=='NA')) &
+    (as.numeric(ga2)/7)<34
+  )
+
+grouping0$OV_SIM_LOSPE$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=110 | as.numeric(max_sbp)>=160 | !(hellp=='No' | is.na(hellp) | hellp=='NA')) &
+    (as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OV_SIM_EOMPE_FGR$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    (as.numeric(newborn_weight)<ref10th) &
+    !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    !(as.numeric(max_dbp)>=110 | as.numeric(max_sbp)>=160 | !(hellp=='No' | is.na(hellp) | hellp=='NA')) &
+    (as.numeric(ga2)/7)<34
+  )
+
+grouping0$OV_SIM_LOMPE_FGR$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    (as.numeric(newborn_weight)<ref10th) &
+    !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    !(as.numeric(max_dbp)>=110 | as.numeric(max_sbp)>=160 | !(hellp=='No' | is.na(hellp) | hellp=='NA')) &
+    (as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OV_SIM_EOSPE_FGR$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    (as.numeric(newborn_weight)<ref10th) &
+    !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=110 | as.numeric(max_sbp)>=160 | !(hellp=='No' | is.na(hellp) | hellp=='NA')) &
+    (as.numeric(ga2)/7)<34
+  )
+
+grouping0$OV_SIM_LOSPE_FGR$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    (as.numeric(newborn_weight)<ref10th) &
+    !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=110 | as.numeric(max_sbp)>=160 | !(hellp=='No' | is.na(hellp) | hellp=='NA')) &
+    (as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OV_EGH$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    !str_detect(title,'preeclampsia') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    (as.numeric(ga2)/7)<34
+  )
+
+grouping0$OV_LGH$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    !str_detect(title,'preeclampsia') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    (as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OV_EGH_FGR$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    !str_detect(title,'preeclampsia') &
+    (as.numeric(newborn_weight)<ref10th) &
+    ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    (as.numeric(ga2)/7)<34
+  )
+
+grouping0$OV_LGH_FGR$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    !str_detect(title,'preeclampsia') &
+    (as.numeric(newborn_weight)<ref10th) &
+    ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    (as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OV_ECH$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    !str_detect(title,'preeclampsia') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    (as.numeric(ga2)/7)<34
+  )
+
+grouping0$OV_LCH$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    !str_detect(title,'preeclampsia') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    (as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OV_ECH_FGR$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    !str_detect(title,'preeclampsia') &
+    (as.numeric(newborn_weight)<ref10th) &
+    !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    (as.numeric(ga2)/7)<34
+  )
+
+grouping0$OV_LCH_FGR$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    !str_detect(title,'preeclampsia') &
+    (as.numeric(newborn_weight)<ref10th) &
+    !((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    (as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OV_EFGR$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    !str_detect(title,'preeclampsia') &
+    (as.numeric(newborn_weight)<ref10th) &
+    ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    !(as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    (as.numeric(ga2)/7)<34
+  )
+
+grouping0$OV_LFGR$GSE30186=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE30186') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    !str_detect(title,'preeclampsia') &
+    (as.numeric(newborn_weight)<ref10th) &
+    ((prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') & !str_detect(title,'CH')) &
+    (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    (as.numeric(ga2)/7)>=34
+  )
+```
+
+```{r GSE10588}
+grouping0$OV_C$GSE10588=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE10588') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    !str_detect(title,'preeclampsia') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    !str_detect(title,'severe') &
+    (as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OV_EOMPE$GSE10588=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE10588') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    !str_detect(title,'severe') &
+    (as.numeric(ga2)/7)<34
+  )
+
+grouping0$OV_LOMPE$GSE10588=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE10588') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    !str_detect(title,'severe') &
+    (as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OV_EOSPE$GSE10588=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE10588') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    str_detect(title,'severe') &
+    (as.numeric(ga2)/7)<34
+  )
+
+grouping0$OV_LOSPE$GSE10588=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE10588') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    str_detect(title,'severe') &
+    (as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OV_EOMPE_FGR$GSE10588=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE10588') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    (as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    !str_detect(title,'severe') &
+    (as.numeric(ga2)/7)<34
+  )
+
+grouping0$OV_LOMPE_FGR$GSE10588=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE10588') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    (as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    !str_detect(title,'severe') &
+    (as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OV_EOSPE_FGR$GSE10588=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE10588') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    (as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    str_detect(title,'severe') &
+    (as.numeric(ga2)/7)<34
+  )
+
+grouping0$OV_LOSPE_FGR$GSE10588=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE10588') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(title,'preeclampsia') &
+    (as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    str_detect(title,'severe') &
+    (as.numeric(ga2)/7)>=34
+  )
+
+grouping0$OV_LFGR$GSE10588=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE10588') %>%
+  filter((as.numeric(ga2)/7)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga2)/7),FUN=apply_who_efw)) %>%   
+  filter(
+    !str_detect(title,'preeclampsia') &
+    (as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    !str_detect(title,'severe') &
+    (as.numeric(ga2)/7)>=34
+  )
+```
+
+```{r GSE24129}
+grouping0$OV_C$GSE24129=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE24129') %>%
+  filter(as.numeric(ga)>=27) %>%
+  filter(
+    !str_detect(title,'Pre-eclampsia') &
+    !str_detect(title,'FGR') &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    !(as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    as.numeric(ga)>=34
+  )
+
+grouping0$OV_EOMPE$GSE24129=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE24129') %>%
+  filter(as.numeric(ga)>=27) %>%
+  filter(
+    str_detect(title,'Pre-eclampsia') &
+    !str_detect(title,'FGR') &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    !(as.numeric(max_dbp)>=110 | as.numeric(max_sbp)>=160 | !(hellp=='No' | is.na(hellp) | hellp=='NA')) &
+    as.numeric(ga)<34
+  )
+
+grouping0$OV_LOMPE$GSE24129=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE24129') %>%
+  filter(as.numeric(ga)>=27) %>%
+  filter(
+    str_detect(title,'Pre-eclampsia') &
+    !str_detect(title,'FGR') &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    (as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    !(as.numeric(max_dbp)>=110 | as.numeric(max_sbp)>=160 | !(hellp=='No' | is.na(hellp) | hellp=='NA')) &
+    as.numeric(ga)>=34
+  )
+
+grouping0$OV_EOSPE$GSE24129=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE24129') %>%
+  filter(as.numeric(ga)>=27) %>%
+  filter(
+    str_detect(title,'Pre-eclampsia') &
+    !str_detect(title,'FGR') &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    (as.numeric(max_dbp)>=110 | as.numeric(max_sbp)>=160 | !(hellp=='No' | is.na(hellp) | hellp=='NA')) &
+    as.numeric(ga)<34
+  )
+
+grouping0$OV_LOSPE$GSE24129=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE24129') %>%
+  filter(as.numeric(ga)>=27) %>%
+  filter(
+    str_detect(title,'Pre-eclampsia') &
+    !str_detect(title,'FGR') &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    (as.numeric(max_dbp)>=110 | as.numeric(max_sbp)>=160 | !(hellp=='No' | is.na(hellp) | hellp=='NA')) &
+    as.numeric(ga)>=34
+  )
+
+grouping0$OV_EFGR$GSE24129=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE24129') %>%
+  filter(as.numeric(ga)>=27) %>%
+  filter(
+    !str_detect(title,'Pre-eclampsia') &
+    str_detect(title,'FGR') &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    !(as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    as.numeric(ga)<34
+  )
+
+grouping0$OV_LFGR$GSE24129=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE24129') %>%
+  filter(as.numeric(ga)>=27) %>%
+  filter(
+    !str_detect(title,'Pre-eclampsia') &
+    str_detect(title,'FGR') &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    !(as.numeric(max_dbp)>=90 | as.numeric(max_sbp)>=140) &
+    as.numeric(ga)>=34
+  )
+```
+
+```{r GSE25906}
+grouping0$OV_C$GSE25906=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE25906') %>%
+  filter(as.numeric(ga)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga)),FUN=apply_who_efw)) %>%   
+  filter(
+    !str_detect(pe,'preeclamptic') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    as.numeric(ga)>=34
+  )
+
+grouping0$OV_PRET$GSE25906=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE25906') %>%
+  filter(as.numeric(ga)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga)),FUN=apply_who_efw)) %>%   
+  filter(
+    !str_detect(pe,'preeclamptic') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    as.numeric(ga)<34
+  )
+
+grouping0$OV_LFGR$GSE25906=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE25906') %>%
+  filter(as.numeric(ga)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga)),FUN=apply_who_efw)) %>%   
+  filter(
+    !str_detect(pe,'preeclamptic') &
+    (as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    as.numeric(ga)>=34
+  )
+
+grouping0$OV_EFGR$GSE25906=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE25906') %>%
+  filter(as.numeric(ga)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga)),FUN=apply_who_efw)) %>%   
+  filter(
+    !str_detect(pe,'preeclamptic') &
+    (as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    as.numeric(ga)<34
+  )
+
+grouping0$OV_LPE$GSE25906=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE25906') %>%
+  filter(as.numeric(ga)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga)),FUN=apply_who_efw)) %>%   
+  filter(
+    str_detect(pe,'preeclamptic') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    as.numeric(ga)>=34
+  )
+
+grouping0$OV_EPE$GSE25906=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE25906') %>%
+  filter(as.numeric(ga)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga)),FUN=apply_who_efw)) %>%
+  filter(
+    str_detect(pe,'preeclamptic') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    as.numeric(ga)<34
+  )
+
+grouping0$OV_LPE_FGR$GSE25906=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE25906') %>%
+  filter(as.numeric(ga)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga)),FUN=apply_who_efw)) %>%
+  filter(
+    str_detect(pe,'preeclamptic') &
+    (as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    as.numeric(ga)>=34
+  )
+
+grouping0$OV_EPE_FGR$GSE25906=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE25906') %>%
+  filter(as.numeric(ga)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga)),FUN=apply_who_efw)) %>%
+  filter(
+    str_detect(pe,'preeclamptic') &
+    (as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    as.numeric(ga)<34
+  )
+```
+
+```{r GSE4707}
+grouping0$OV_C$GSE4707=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE4707') %>%
+  filter(
+    !str_detect(title,'PE') &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    !(str_detect(title,'EO') | str_detect(title,'LO'))
+  )
+
+grouping0$OV_EOPE$GSE4707=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE4707') %>%
+  filter(
+    str_detect(title,'PE') &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    str_detect(title,'EO')
+  )
+
+grouping0$OV_LOPE$GSE4707=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE4707') %>%
+  filter(
+    str_detect(title,'PE') &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    str_detect(title,'LO')
+  )
+```
+
+```{r GSE44711}
+grouping0$OV_C$GSE44711=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE44711') %>%
+  filter(
+    !str_detect(title,'PE') &
+    (iugr=='No' | is.na(iugr) | iugr=='NA') &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    !str_detect(ga,'EO') &
+    (hellp=='No' | is.na(hellp) | hellp=='NA')
+  )
+
+grouping0$OV_EOPE$GSE44711=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE44711') %>%
+  filter(
+    str_detect(title,'PE') &
+    (iugr=='No' | is.na(iugr) | iugr=='NA') &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    str_detect(ga,'EO') &
+    (hellp=='No' | is.na(hellp) | hellp=='NA')
+  )
+
+grouping0$OV_LOPE$GSE44711=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE44711') %>%
+  filter(
+    str_detect(title,'PE') &
+    (iugr=='No' | is.na(iugr) | iugr=='NA') &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    !str_detect(ga,'EO') &
+    (hellp=='No' | is.na(hellp) | hellp=='NA')
+  )
+
+grouping0$OV_EOSPE$GSE44711=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE44711') %>%
+  filter(
+    str_detect(title,'PE') &
+    (iugr=='No' | is.na(iugr) | iugr=='NA') &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    str_detect(ga,'EO') &
+    !(hellp=='No' | is.na(hellp) | hellp=='NA')
+  )
+
+grouping0$OV_LOSPE$GSE44711=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE44711') %>%
+  filter(
+    str_detect(title,'PE') &
+    (iugr=='No' | is.na(iugr) | iugr=='NA') &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    !str_detect(ga,'EO') &
+    !(hellp=='No' | is.na(hellp) | hellp=='NA')
+  )
+
+grouping0$OV_EOPE_FGR$GSE44711=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE44711') %>%
+  filter(
+    str_detect(title,'PE') &
+    !(iugr=='No' | is.na(iugr) | iugr=='NA') &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    str_detect(ga,'EO') &
+    (hellp=='No' | is.na(hellp) | hellp=='NA')
+  )
+
+grouping0$OV_LOPE_FGR$GSE44711=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE44711') %>%
+  filter(
+    str_detect(title,'PE') &
+    !(iugr=='No' | is.na(iugr) | iugr=='NA') &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    !str_detect(ga,'EO') &
+    (hellp=='No' | is.na(hellp) | hellp=='NA')
+  )
+
+grouping0$OV_EOSPE_FGR$GSE44711=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE44711') %>%
+  filter(
+    str_detect(title,'PE') &
+    !(iugr=='No' | is.na(iugr) | iugr=='NA') &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    str_detect(ga,'EO') &
+    !(hellp=='No' | is.na(hellp) | hellp=='NA')
+  )
+
+grouping0$OV_LOSPE_FGR$GSE44711=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE44711') %>%
+  filter(
+    str_detect(title,'PE') &
+    !(iugr=='No' | is.na(iugr) | iugr=='NA') &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    !str_detect(ga,'EO') &
+    !(hellp=='No' | is.na(hellp) | hellp=='NA')
+  )
+```
+
+```{r GSE128381}
+grouping0$OV_C$GSE128381=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE128381') %>%
+  filter(as.numeric(ga)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga)),FUN=apply_who_efw)) %>%
+  filter(
+    !(title=='Yes') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    as.numeric(ga)>=34 &
+    (hellp=='No' | is.na(hellp) | hellp=='NA')
+  )
+
+grouping0$OV_PRET$GSE128381=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE128381') %>%
+  filter(as.numeric(ga)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga)),FUN=apply_who_efw)) %>%
+  filter(
+    !(title=='Yes') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    as.numeric(ga)<34 &
+    (hellp=='No' | is.na(hellp) | hellp=='NA')
+  )
+
+grouping0$OV_LFGR$GSE128381=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE128381') %>%
+  filter(as.numeric(ga)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga)),FUN=apply_who_efw)) %>%
+  filter(
+    !(title=='Yes') &
+    (as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    as.numeric(ga)>=34 &
+    (hellp=='No' | is.na(hellp) | hellp=='NA')
+  )
+
+grouping0$OV_EFGR$GSE128381=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE128381') %>%
+  filter(as.numeric(ga)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga)),FUN=apply_who_efw)) %>%
+  filter(
+    !(title=='Yes') &
+    (as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    as.numeric(ga)<34 &
+    (hellp=='No' | is.na(hellp) | hellp=='NA')
+  )
+
+grouping0$OV_LGH$GSE128381=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE128381') %>%
+  filter(as.numeric(ga)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga)),FUN=apply_who_efw)) %>%
+  filter(
+    (title=='Yes') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    as.numeric(ga)>=34 &
+    (hellp=='No' | is.na(hellp) | hellp=='NA')
+  )
+
+grouping0$OV_EGH$GSE128381=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE128381') %>%
+  filter(as.numeric(ga)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga)),FUN=apply_who_efw)) %>%
+  filter(
+    (title=='Yes') &
+    !(as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    as.numeric(ga)<34 &
+    (hellp=='No' | is.na(hellp) | hellp=='NA')
+  )
+
+grouping0$OV_LGH_FGR$GSE128381=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE128381') %>%
+  filter(as.numeric(ga)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga)),FUN=apply_who_efw)) %>%
+  filter(
+    (title=='Yes') &
+    (as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    as.numeric(ga)>=34 &
+    (hellp=='No' | is.na(hellp) | hellp=='NA')
+  )
+
+grouping0$OV_EGH_FGR$GSE128381=poi %>%
+  filter(set=='Validation set, Outcome, Placenta' & gse=='GSE128381') %>%
+  filter(as.numeric(ga)>=27) %>%
+  mutate(ref10th=sapply(X=round(as.numeric(ga)),FUN=apply_who_efw)) %>%
+  filter(
+    (title=='Yes') &
+    (as.numeric(newborn_weight)<ref10th) &
+    (prev_ht=='No' | is.na(prev_ht) | prev_ht=='NA') &
+    as.numeric(ga)<34 &
+    (hellp=='No' | is.na(hellp) | hellp=='NA')
+  )
+```
+
+```{r Count row number of each dataset in the list, include=FALSE}
+grouping0$count_nrow=count_nrow(grouping0)
+```
+
+```{r Show row number of each dataset in the list, eval=FALSE, include=FALSE}
+grouping0$count_nrow
+```
+
+```{r Remove validation groups not overlapped on discovery ones, include=FALSE}
+disc_val_groups=
+  paste0(
+    'OV_'
+    ,intersect(
+      grouping0$count_nrow %>%
+        filter(group=='OD') %>%
+        .$event
+      ,grouping0$count_nrow %>%
+        filter(group=='OV') %>%
+        .$event
+    )
+  ) %>%
+  c('OV_C')
+
+val_out_common=
+  setdiff(
+    names(grouping0) %>%
+      .[str_detect(.,'OV_')]
+    ,disc_val_groups
+  )
+
+grouping=grouping0
+
+grouping[val_out_common]=NULL
+
+grouping$count_nrow=
+  grouping0$count_nrow %>%
+  filter(
+    !(group %in% str_split_fixed(val_out_common,'_',2)[,1]
+      & (
+        event %in% str_split_fixed(val_out_common,'_',2)[,2]
+        | non_event %in% str_split_fixed(val_out_common,'_',2)[,2]
+      )
+    )
+  )
+```
+
+# Dataset integration
+
+```{r Combine esets and the comparisons with common genes, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 03s
+  clist=
+    # Combine all expression sets in a list
+    list(
+      GSE4888=GSE4888
+      ,GSE6364=GSE6364
+      ,EMTAB680=EMTAB680
+      ,GSE12767=GSE12767
+      ,GSE9984=GSE9984
+      ,GSE75010=GSE75010
+      ,GSE98224=GSE98224
+      ,GSE100415=GSE100415
+      ,GSE30186=GSE30186
+      ,GSE10588=GSE10588
+      ,GSE24129=GSE24129
+      ,GSE25906=GSE25906
+      ,GSE4707=GSE4707
+      ,GSE44711=GSE44711
+      ,GSE128381=GSE128381
+    ) %>%
+    
+    # Combine the pairs of comparisons
+    bind_comparison(grouping) %>%
+    
+    # Use only the common genes among all sets
+    lapply(X=.,FUN=take_common_genes,the_clist=.)
+  
+  saveRDS(clist,'data/clist0_combined.rds')
+}else{
+  clist=readRDS('data/clist0_combined.rds')
+}
+```
+
+```{r Bit-transformed batch-effect combat for validation sets, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 19s
+  clist[names(clist) %>% str_detect('OV_')]=
+    clist[names(clist) %>% .[str_detect(.,'OV_')]] %>%
+    lapply(merge_eset) %>%
+    setNames(names(clist) %>% .[str_detect(.,'OV_')])
+  
+  saveRDS(clist,'data/clist1_becombat.rds')
+}else{
+  clist=readRDS('data/clist1_becombat.rds')
+}
+```
+
+```{r Normalize comparison and conduct sample size estimation, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 09m 47s
+  clist=
+    # Normalize the comparisons
+    clist %>%
+    lapply(normalize_eset) %>%
+    
+    # Compute and integrate minimum sample size for FDR for each expression set
+    FDR_min_size()
+  
+  saveRDS(clist,'data/clist2_norminsize.rds')
+}else{
+  clist=readRDS('data/clist2_norminsize.rds')
+}
+```
+
+# Differential Expression Analysis (DEA)
+
+```{r DEA and surrogate variable analysis (SVA) and volcano plot, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 07s
+  dea_results=
+    clist[!(names(clist) %>% str_detect('OV_'))] %>%
+    lapply(conduct_dea) %>%
+    setNames(names(clist) %>% .[!str_detect(.,'OV_')])
+  
+  saveRDS(dea_results,'data/dea_results.rds')
+}else{
+  dea_results=readRDS('data/dea_results.rds')
+}
+```
+
+```{r Identify validation sets, include=FALSE}
+disc_val_sets=
+  paste0(
+    'OV_',
+    intersect(
+      names(clist) %>%
+        .[str_detect(.,'OD_')] %>%
+        str_split_fixed('_',2) %>%
+        .[,2]
+      ,names(clist) %>%
+        .[str_detect(.,'OV_')] %>%
+        str_split_fixed('_',2) %>%
+        .[,2]
+    )
+  )
+```
+
+```{r Integrate DEA results to feature data, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 01s
+  clist[!(names(clist) %>% str_detect('OV_'))]=
+    clist[!(names(clist) %>% str_detect('OV_'))] %>%
+    integrate_dea_to_fData(dea_results)
+  
+  clist=clist %>%
+    integrate_dea_to_val(dea_results,disc_val_sets)
+  
+  saveRDS(clist,'data/clist3_dea.rds')
+}else{
+  clist=readRDS('data/clist3_dea.rds')
+}
+```
+
+# Overlapped DEG analysis (ODA)
+
+```{r Identify overlaps to any expression sets, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 01s
+  clist=
+    clist %>%
+    conduct_oda()
+  
+  saveRDS(clist,'data/clist4_oda.rds')
+}else{
+  clist=readRDS('data/clist4_oda.rds')
+}
+```
+
+```{r Compute Fisher with Jaccard index, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 02m 11s
+  oda_results=
+    clist %>%
+    bulk_fisher_eset()
+  
+  saveRDS(oda_results,'data/oda_results.rds')
+}else{
+  oda_results=readRDS('data/oda_results.rds')
+}
+```
+
+```{r Show ODA, eval=FALSE, include=FALSE}
+oda_results
+```
+
+```{r Visualize ODA, eval=FALSE, fig.height=7, fig.width=7, include=FALSE}
+oda_results %>%
+  vis_bulk_fisher_eset()
+```
+
+```{r Summary of overlaps, include=FALSE}
+sum_oda_results=
+  oda_results %>%
+  group_by(A,B) %>%
+  summarize(
+    overlap=sum(ifelse(overlap=='Not significant',0,1))
+    ,.groups='drop'
+  ) %>%
+  filter(
+    A!=B
+    & overlap>0
+    & str_split_fixed(B,'_',2)[,1]=='OD'
+  ) %>%
+  select(B,A) %>%
+  arrange(
+    factor(B,paste0('OD_C_',c(
+      'ECH','LCH','EGH','LGH',
+      'EOMPE','LOMPE','EOSPE','LOSPE',
+      'SIM_EOMPE','SIM_LOMPE','SIM_EOSPE','SIM_LOSPE'
+    ))),
+    factor(A,c(
+      'E_PRE_ESE','E_PRE_MSE','E_PRE_LSE',
+      'D_EPND_EPID','D_EPND_IPID','D_EPND_IPCD',
+      'P_TE_T1','P_TE_T2',
+      'C2_NC2_CHOR2','C3_NC3_CHOR3',
+      'H2_NH2_HELLP2','H3_NH3_HELLP3'
+    ))
+  )
+```
+
+```{r Show overlap summary, eval=FALSE, include=FALSE}
+sum_oda_results
+```
+
+# Pathway Enrichment Analysis (PEA)
+
+```{r Download the GO from Ensembl, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 09m 45s
+  # Downloaded 2023-07-31
+  go_evidence=
+    getBM(
+      mart=ensembl
+      ,attributes=c('go_id','go_linkage_type')
+    ) %>%
+    apply(2,as.character) %>%
+    apply(2,trimws) %>%
+    apply(2,function(x) gsub('^$|^ $',NA,x)) %>%
+    as.data.frame(stringsAsFactors=FALSE) %>%
+    filter(!(is.na(go_id) | is.na(go_linkage_type)))
+  
+  saveRDS(go_evidence,file='data/go_evidence.rds')
+}else{
+  go_evidence=readRDS(file='data/go_evidence.rds') 
+}
+```
+
+```{r Create GO table for filtering, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 05m 54s
+  filt_go=
+    clist %>%
+    create_filt_go()
+  
+  saveRDS(filt_go,'data/filt_go.rds')
+}else{
+  filt_go=readRDS('data/filt_go.rds')
+}
+```
+
+```{r Conduct PEA for the associated factors (AF), include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 05m 54s
+  pea_results_af=
+    clist[!str_detect(names(clist),'O._')] %>%
+    lapply(conduct_go_pea,filt_go) %>%
+    lapply(enr_go_ancestors_only) %>%
+    setNames(names(clist) %>% .[!str_detect(.,'O._')])
+  
+  saveRDS(pea_results_af,'data/pea_results_af.rds')
+}else{
+  pea_results_af=readRDS('data/pea_results_af.rds')
+}
+```
+
+```{r Conduct PEA using AF-GS that sig-ovl outcome DEGs, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 05m 54s
+  pea_results_outcome=
+    sum_oda_results %>%
+    bulk_conduct_pea_outcome(
+      clist[str_detect(names(clist),'OD_')]
+      ,filt_go
+      ,pea_results_af
+    )
+  
+  saveRDS(pea_results_outcome,'data/pea_results_outcome.rds')
+}else{
+  pea_results_outcome=readRDS('data/pea_results_outcome.rds')
+}
+```
+
+```{r Show the mapping between GO and the genes, eval=FALSE, include=FALSE}
+pea_to_mapping(pea_results_outcome,clist)
+```
+
+```{r Visualize AF E-GO that sig-E by outcome DEGs, eval=FALSE, include=FALSE}
+pea_results_outcome %>%
+  .[str_detect(names(.),'OD_C_EOSPE[.]')] %>%
+  lapply(pea_to_hierarchy) %>%
+  lapply(igraph_dag_tree)
+```
+
+# Data-driven ontology inference
+
+```{r Correlation matrices using AF-GS that sig-ovl outcome DEGs, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 05m 22s
+  pear_cor_mats=
+    sum_oda_results %>%
+    pear_cor_mat(clist)
+  
+  saveRDS(pear_cor_mats,'data/pear_cor_mats.rds')
+}else{
+  pear_cor_mats=readRDS('data/pear_cor_mats.rds')
+}
+```
+
+```{r Conduct DDOI using AF-GS that sig-ovl outcome DEGs, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 09m 50
+  cx_results=
+    pear_cor_mats %>%
+    bulk_conduct_cx_outcome()
+  
+  saveRDS(cx_results,'data/cx_results.rds')
+}else{
+  cx_results=readRDS('data/cx_results.rds')
+}
+```
+
+```{r Show the mapping between CliXO and the genes, eval=FALSE, include=FALSE}
+cx_results %>%
+  lapply(cx_to_mapping)
+```
+
+```{r Visualize CliXO from ovl-DEGs of outcome-AF, eval=FALSE, include=FALSE}
+cx_results %>%
+  lapply(cx_to_hierarchy) %>%
+  lapply(igraph_dag_tree)
+```
+
+# Ontology alignment
+
+```{r Get complete and most updated GO as reference ontology, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 04s
+  # Downloaded on 2023-07-30
+  curl::curl_download(
+    paste0(
+      'http://purl.obolibrary.org/obo/'
+      ,'go/go-basic.obo'
+    )
+    ,'data/go_basic.obo'
+  )
+  
+  go=get_go_from_obo('data/go_basic.obo')
+  saveRDS(go,'data/go.rds')
+}else{
+  go=readRDS('data/go.rds')
+}
+```
+
+```{r Create TXT files of CliXO and GO for alignontology, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 13s
+  if(!dir.exists('data/alignontology')){
+    dir.create('data/alignontology',recursive=T)
+  }
+  
+  create_txt_for_alignOntology(
+    cx_results
+    ,go
+    ,'data/alignontology'
+  )
+  
+  cx_results %>%
+    .[sapply(.,is.null)==F] %>%
+    names() %>%
+    write.table(
+      file='data/alignontology/list.txt'
+      ,quote=F
+      ,row.names=F
+      ,col.names=F
+    )
+}
+```
+
+```{r Set arguments for running alignontology in WSL, include=FALSE}
+alignontology=
+  list(
+    min_similarity=0.05
+    ,semantic_verification='criss_cross'
+    ,allow_multimap=as.integer(F)
+    ,features_as_terms=as.integer(T)
+    ,feature_name='feature'
+    ,n_rand_align=100
+    ,effect_size=0
+    ,pvals=as.integer(T)
+  )
+```
+
+```{r Meta-code for running alignontology in WSL, eval=FALSE, include=FALSE}
+paste0(
+    c('while IFS= read -r line'
+      ,'do'
+      ,'  line=$(echo "${line}" | sed -e \'s/^[[:space:]]*//\' -e \'s/[[:space:]]*$//\' -e \'s/[[:space:]]\\+/_/g\')'
+      ,'  alignontology_0.1/alignOntology \\'
+      ,'    "data/alignontology/${line}.txt" \\'
+      ,'    "data/alignontology/go.txt" \\'
+      ,paste0(
+        c('   '
+          ,unlist(alignontology[1:5])
+          ,'> \\'
+        )
+        ,collapse=' '
+      )
+      ,'    "data/alignontology/${line}_alignment.out"'
+    )
+    ,collapse='\n'
+  ) %>%
+  c(paste0(
+      c('  alignontology_0.1/calculateFDRsForAlignment \\'
+        ,'    "data/alignontology/${line}.txt" \\'
+        ,'    "data/alignontology/${line}_alignment.out" \\'
+        ,'    "data/alignontology/${line}/" \\'
+        ,paste0(
+          c('   '
+            ,unlist(alignontology[6:8])
+            ,'> \\'
+          )
+          ,collapse=' '
+        )
+        ,'    "data/alignontology/${line}_FDRs.out"'
+        ,'done < "data/alignontology/list.txt"'
+      )
+      ,collapse='\n'
+    )
+  ) %>%
+  paste0(collapse='\n\n') %>%
+  cat()
+```
+
+```{r Get complete and most updated GO with term and definition, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 01s
+  complete_go=
+    get_OBO(
+      'data/go_basic.obo'
+      ,extract_tags='everything'
+    )
+  
+  saveRDS(complete_go,'data/complete_go.rds')
+}else{
+  complete_go=readRDS('data/complete_go.rds')
+}
+```
+
+```{r Read alignontology results, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 33s
+  ao_results=
+    read_ao_by_rc_results(
+      cx_results
+      ,path='data/alignontology/'
+      ,complete_go
+      ,go
+    )
+  
+  saveRDS(ao_results,'data/ao_results.rds')
+}else{
+  ao_results=readRDS('data/ao_results.rds')
+}
+```
+
+# Deep-insight visible neural network (DI-VNN)
+
+```{r QQ-normalize validation sets by discovery controls, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 01s
+  clist[str_detect(names(clist),'OV_')]=
+    qnorm_val_by_disc_control(clist)
+  
+  saveRDS(clist,'data/clist5_qnormval.rds')
+}else{
+  clist=readRDS('data/clist5_qnormval.rds')
+}
+```
+
+```{r Apply 1-bit stochastic gradient descent (SGD) by diff-avg, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 01s
+  onebitsgd_results=
+    sum_oda_results %>%
+    apply_1bitsgd(clist)
+  
+  saveRDS(onebitsgd_results,'data/onebitsgd_results.rds')
+}else{
+  onebitsgd_results=readRDS('data/onebitsgd_results.rds')
+}
+```
+
+```{r Preliminary creation of t-SNE feature maps, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 33s
+  tsne_results=
+    pear_cor_mats %>%
+    lapply(bar_hut_tsne,seed_num=seed)
+  
+  saveRDS(tsne_results,'data/tsne_results.rds')
+}else{
+  tsne_results=readRDS('data/tsne_results.rds')
+}
+```
+
+```{r Identify available ovl AF-outcome with transformation, include=FALSE}
+avail_ovl=
+  onebitsgd_results %>%
+  .[!sapply(.,is.null)] %>%
+  names() %>%
+  intersect(
+    tsne_results %>%
+      .[!sapply(.,is.null)] %>%
+      names()
+  ) %>%
+  .[str_detect(
+      .
+      ,clist %>%
+        names() %>%
+        .[str_detect(.,'OV_')] %>%
+        str_remove_all('OV_') %>%
+        paste0(collapse='|')
+    )
+  ]
+
+avail_ovl_pea=
+  avail_ovl %>%
+  intersect(
+    pea_results_outcome %>%
+      .[!sapply(.,is.null)] %>%
+      names()
+  )
+
+avail_ovl_cx=
+  avail_ovl %>%
+  intersect(
+    cx_results %>%
+      .[!sapply(.,is.null)] %>%
+      names()
+  )
+```
+
+```{r DI-VNN feature selection and representation, include=FALSE}
+for(ontoclass in c('cx','pea')){
+  
+  if(ontoclass=='pea'){
+    X=avail_ovl_pea
+  }else{
+    X=avail_ovl_cx
+  }
+  
+  for(x in X){
+    
+    input=list()
+    
+    input$value=
+      onebitsgd_results %>%
+      .[[x]] %>%
+      t() %>%
+      as.data.frame()
+    
+    input$outcome=
+      clist %>%
+      .[[str_split_fixed(x,'\\.',2)[,1]]] %>%
+      pData() %>%
+      mutate(outcome=as.integer(outcome==levels(outcome)[2])) %>%
+      pull(outcome) %>%
+      setNames(rownames(input$value))
+    
+    input$similarity=
+      pear_cor_mats %>%
+      .[[x]]
+    
+    input$mapping=
+      tsne_results %>%
+      .[[x]]
+    
+    if(ontoclass=='pea'){
+      input$ontology=
+        pea_results_outcome %>%
+        .[x] %>%
+        pea_to_mapping(clist) %>%
+        .[[1]] %>%
+        select(source=feature,target=oid) %>%
+        mutate(similarity=NA,relation='feature') %>%
+        rbind(
+          pea_results_outcome %>%
+            .[x] %>%
+            lapply(pea_to_hierarchy) %>%
+            .[[1]] %>%
+            select(source=from,target=to) %>%
+            mutate(similarity=NA,relation='is_a')
+        ) %>%
+        filter(target!='root')
+    }else{
+      input$ontology=
+        cx_results %>%
+        .[[x]]
+    }
+    
+    input$ontology=
+      input$ontology %>%
+      mutate(seq=seq(nrow(.))) %>%
+      gather(key,value,-similarity,-relation,-seq) %>%
+      mutate(
+        value2=
+          ifelse(
+            str_detect(value,'[:alpha:]+\\:')
+            ,str_remove_all(value,'[:alpha:]+\\:')
+            ,NA
+          ) %>%
+          as.integer()
+      ) %>%
+      mutate(
+        value3=
+          ifelse(
+            str_detect(value,'[:alpha:]+\\:')
+            ,paste0(
+              'ONT:'
+              ,str_pad(value2,str_count(max(value2,na.rm=T)),'left','0')
+            )
+            ,value
+          )
+      )
+    
+    if(!dir.exists('data/divnn_models/ontology')){
+      dir.create('data/divnn_models/ontology',recursive=T)
+    }
+    
+    input$ontology %>%
+      select(value,value3) %>%
+      filter(str_detect(value,'[:alpha:]+\\:')) %>%
+      filter(!duplicated(.)) %>%
+      rename(old_oid=value,new_oid=value3) %>%
+      write_csv(paste0('data/divnn_models/ontology','/',x,'_',ontoclass,'.csv'))
+    
+    input$ontology=
+      input$ontology %>%
+      mutate(value=value3) %>%
+      select(-value2,-value3) %>%
+      spread(key,value) %>%
+      arrange(seq) %>%
+      select(-seq) %>%
+      select(source,target,everything())
+    
+    input$fit=
+      clist %>%
+      .[[str_split_fixed(x,'\\.',2)[,1]]] %>%
+      fData() %>%
+      .[,c('logFC','AveExpr','t','P.Value','adj.P.Val','B')]
+    
+    output=
+      TidySet.compile(
+        value=input$value
+        ,outcome=input$outcome
+        ,similarity=input$similarity
+        ,mapping=input$mapping
+        ,ontology=input$ontology
+        ,ranked=T
+        ,dims=224
+        ,decreasing=F
+        ,seed_num=seed
+      )
+    
+    output %>%
+      TidySet.write(
+        paste0('data/divnn_models','/',x,'_',ontoclass,'_target')
+      )
+  }
+  
+}
+```
+
+```{r Center gene expression by diff-avg, include=FALSE}
+if(all(c(1,2)%in%comp_req)){ # 01m 01s
+  
+  sum_oda_results_val_only=
+    sum_oda_results %>%
+    filter(
+      str_detect(
+        B
+        ,clist %>%
+          names() %>%
+          .[str_detect(.,'OV_')] %>%
+          str_remove_all('OV_') %>%
+          paste0('$') %>%
+          paste0(collapse='|')
+      )
+    ) %>%
+    rbind(
+      mutate(
+        .
+        ,B=
+          B %>%
+          str_replace_all('OD_','OV_')
+      )
+    )
+  
+  centergene_results=
+    sum_oda_results_val_only %>%
+    center_gene_exp(clist,ovl=F)
+  
+  saveRDS(centergene_results,'data/centergene_results.rds')
+  
+  centerovl_results=
+    sum_oda_results_val_only %>%
+    center_gene_exp(clist,ovl=T)
+  
+  saveRDS(centerovl_results,'data/centerovl_results.rds')
+  rm(sum_oda_results_val_only)
+}else{
+  centergene_results=readRDS('data/centergene_results.rds')
+  centerovl_results=readRDS('data/centerovl_results.rds')
+}
+```
+
+```{r Identify available ovl AF-outcome without transformation, include=FALSE}
+avail_ovl_nontrans=
+  centerovl_results %>%
+  .[!sapply(.,is.null)] %>%
+  names()
+
+avail_ovl_pea_nontrans=
+  avail_ovl_nontrans %>%
+  intersect(
+    pea_results_outcome %>%
+      .[!sapply(.,is.null)] %>%
+      names()
+  )
+
+avail_ovl_cx_nontrans=
+  avail_ovl_nontrans %>%
+  intersect(
+    cx_results %>%
+      .[!sapply(.,is.null)] %>%
+      names()
+  )
+```
+
+```{r}
+centergene_pca=
+  centergene_results %>%
+  .[str_detect(names(.),'OD_')] %>%
+  lapply(t) %>%
+  lapply(prcomp)
+
+centergene_pc=
+  centergene_results %>%
+  lapply(t) %>%
+  lapply(X=names(.),Y=.,Z=centergene_pca,\(X,Y,Z)
+    Y[[X]] %*% Z[[str_replace_all(X,'OV_','OD_')]]$rotation
+  ) %>%
+  lapply(as.data.frame) %>%
+  setNames(
+    centergene_results %>%
+      names()
+  )
+
+centerovl_pca=
+  centerovl_results %>%
+  .[str_detect(names(.),'OD_')] %>%
+  lapply(t) %>%
+  lapply(prcomp)
+
+centerovl_pc=
+  centerovl_results %>%
+  lapply(t) %>%
+  lapply(X=names(.),Y=.,Z=centerovl_pca,\(X,Y,Z)
+    Y[[X]] %*% Z[[str_replace_all(X,'OV_','OD_')]]$rotation
+  ) %>%
+  lapply(as.data.frame) %>%
+  setNames(
+    centerovl_results %>%
+      names()
+  )
+
+pea_results_outcome %>%
+  .[intersect(avail_ovl_pea_nontrans,avail_ovl_cx_nontrans)] %>%
+  .[1:2] %>%
+  pea_to_mapping(clist)
+clist[['OD_C_EOSPE']] %>%
+  fData()
+cx_results %>%
+  .[intersect(avail_ovl_pea_nontrans,avail_ovl_cx_nontrans)] %>%
+  .[1:2] %>%
+  pblapply(cx_to_mapping)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

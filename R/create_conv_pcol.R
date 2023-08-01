@@ -1,0 +1,25 @@
+# Build a function to create table for converting phenotype colnames
+create_conv_pcol=function(phenotype_input,std_colname){
+  matrix(
+    c(
+      colnames(phenotype_input$GSE4888)[c(1,rep(NA,10),5,rep(NA,2),6,rep(NA,12),7,rep(NA,18),3,9,rep(NA,5))],
+      colnames(phenotype_input$GSE6364)[c(1,rep(NA,26),4,rep(NA,18),5,6,rep(NA,5))],
+      colnames(phenotype_input$EMTAB680)[c(1,rep(NA,26),2,rep(NA,20),3,4,rep(NA,3))],
+      colnames(phenotype_input$GSE12767)[c(1,rep(NA,6),9,rep(NA,2),20,3,NA,7,6,12,11,rep(NA,2),10,
+                                           rep(NA,7),2,rep(NA,6),4:5,8,13:19,21:22,rep(NA,7))],
+      colnames(phenotype$GSE9984)[c(1,rep(NA,4),6,5,4,8,NA,7,rep(NA,8),9,rep(NA,4),10,rep(NA,2),2,rep(NA,25))],
+      colnames(phenotype_input$GSE75010)[c(1:29,rep(NA,24))],
+      colnames(phenotype_input$GSE98224)[c(1:29,rep(NA,24))],
+      colnames(phenotype_input$GSE100415)[c(1:3,rep(NA,3),6:7,NA,5,NA,8:11,14,17:18,NA,19,NA,20,NA,
+                                            22,rep(NA,3),23,4,12:13,15:16,21,rep(NA,19))],
+      colnames(phenotype_input$GSE30186)[c(1,rep(NA,4),1,5,rep(NA,4),2,rep(NA,2),3,7,6,rep(NA,7),10,rep(NA,2),4,rep(NA,13),9,NA,8,rep(NA,9))],
+      colnames(phenotype_input$GSE10588)[c(1,rep(NA,4),1,8,rep(NA,4),3,NA,4,rep(NA,3),7,6,rep(NA,5),11,rep(NA,2),2,rep(NA,13),5,NA,9,rep(NA,6),10,rep(NA,2))],
+      colnames(phenotype_input$GSE24129)[c(1,rep(NA,4),2,NA,6,rep(NA,2),2,4,NA,5,NA,10,9,11,rep(NA,9),3,rep(NA,15),7,rep(NA,6),8,rep(NA,2))],
+      colnames(phenotype_input$GSE25906)[c(1,rep(NA,4),3,NA,5,NA,4,rep(NA,9),11,rep(NA,7),7,rep(NA,2),10,rep(NA,12),9,rep(NA,7),6,2)],
+      colnames(phenotype_input$GSE4707)[c(1,rep(NA,4),2,NA,2,rep(NA,11),3,rep(NA,7),2,rep(NA,25))],
+      colnames(phenotype_input$GSE44711)[c(1,rep(NA,4),2,NA,2,6,NA,7,rep(NA,16),2,rep(NA,25))],
+      colnames(phenotype_input$GSE128381)[c(6,rep(NA,4),14,NA,4,NA,12,NA,8,NA,9,3,rep(NA,11),11,13,rep(NA,7),11,4,rep(NA,6),2,rep(NA,9))]
+    ),
+    nrow=length(std_colname),dimnames=list(std_colname,names(phenotype_input))
+  )
+}
